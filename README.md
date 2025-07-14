@@ -12,11 +12,13 @@ A real-time data streaming system that connects NI-DAQmx hardware to web browser
 
 - Real-time data streaming from NI-DAQmx hardware
 - WebSocket communication for low-latency browser updates
-- Modern web interface with live data visualization
-- Modular device configuration system
-- 16-channel PT card (NI-9208) current monitoring
+- High-contrast light mode interface optimized for outdoor viewing
+- 70/30 split layout: P&ID diagram area + live sensor data
+- 16-channel PT card (NI-9208) with 4-20mA to ksi conversion
+- Grouped sensor display: LOX (blue), Fuel (orange), Other (green)
+- JSON-based sensor configuration system
 - Automatic reconnection and error handling
-- Extensible device registry for future hardware
+- Modular device configuration system
 
 ## Setup
 
@@ -76,6 +78,10 @@ A real-time data streaming system that connects NI-DAQmx hardware to web browser
 ```bash
 .\start_system.bat
 ```
+or
+```bash
+.\start_system_main.bat
+```
 
 **Shutdown System:**
 ```bash
@@ -113,15 +119,50 @@ The system will:
 
 ## Configuration
 
-### Configuration (`config.py`)
+### Configuration
 
+#### Main Configuration (`config.py`)
 - `DAQ_HOST`: NI-DAQmx hardware IP address (default: 192.168.8.236)
 - `NODE_HOST`: Node.js server host (default: localhost)
-- `NODE_TCP_PORT`: Node.js TCP port (default: 5000)
-- `DEVICE_CHASSIS`: DAQ chassis name (default: cDAQ9189)
+- `NODE_TCP_PORT`: Node.js TCP port (default: 5001)
+- `DEVICE_CHASSIS`: DAQ chassis name (default: cDAQ9189-2462EFD)
 - `ACTIVE_DEVICES`: List of active device modules (default: ["pt_card"])
 
-### Adding New Devices
+#### Interface Configuration (`interface_config.json`)
+- Sensor definitions with channels, names, IDs, and calibration
+- PT grouping: `lox`, `fuel`, `other` with color-coded display
+- Calibration settings: 4-20mA to 0-10ksi (customizable per sensor)
+- Layout settings: P&ID vs data panel sizing
+
+### Customizing PT Sensors
+
+1. **Edit `interface_config.json`** to modify sensor names, groups, and calibration
+2. **Channel Groups**: 
+   - `lox`: Blue border (LOX system sensors)
+   - `fuel`: Orange border (Fuel system sensors) 
+   - `other`: Green border (Auxiliary sensors)
+3. **Calibration**: Adjust `min_ksi`/`max_ksi` for different pressure ranges
+4. **Names**: Use descriptive names that will be displayed in the interface
+
+Example sensor configuration:
+```json
+{
+  "channel": 0,
+  "name": "LOX Reg Upstream", 
+  "id": "PT1E",
+  "serial": "1A02FJW7H2V",
+  "group": "lox",
+  "calibration": {
+    "min_ma": 4.0,
+    "max_ma": 20.0,
+    "min_ksi": 0.0,
+    "max_ksi": 10.0,
+    "units": "ksi"
+  }
+}
+```
+
+### Adding New Device Types
 
 1. Create new device class in `devices/` extending `BaseDevice`
 2. Register device in `devices/device_registry.py`

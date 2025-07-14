@@ -1,0 +1,239 @@
+{
+  "interface": {
+    "title": "ERPL DAQ Monitor",
+    "layout": {
+      "pid_width_percent": 70,
+      "data_width_percent": 30
+    },
+    "theme": {
+      "mode": "light",
+      "high_contrast": true
+    }
+  },
+  "sensors": [
+    {
+      "channel": 0,
+      "name": "LOX Reg Upstream",
+      "id": "PT1E",
+      "serial": "1A02FJW7H2V",
+      "group": "lox",
+      "calibration": {
+        "min_ma": 4.0,
+        "max_ma": 20.0,
+        "min_psi": 0.0,
+        "max_psi": 10000.0,
+        "units": "psi"
+      }
+    },
+    {
+      "channel": 1,
+      "name": "LOX Reg Downstream",
+      "id": "PT2E",
+      "serial": "2A02FJW7H2V",
+      "group": "lox",
+      "calibration": {
+        "min_ma": 4.0,
+        "max_ma": 20.0,
+        "min_psi": 0.0,
+        "max_psi": 10000.0,
+        "units": "psi"
+      }
+    },
+    {
+      "channel": 2,
+      "name": "LOX Tank Upstream",
+      "id": "PT3E",
+      "serial": "3A02FJW7H2V",
+      "group": "lox",
+      "calibration": {
+        "min_ma": 4.0,
+        "max_ma": 20.0,
+        "min_psi": 0.0,
+        "max_psi": 10000.0,
+        "units": "psi"
+      }
+    },
+    {
+      "channel": 3,
+      "name": "LOX Tank Downstream",
+      "id": "PT4E",
+      "serial": "4A02FJW7H2V",
+      "group": "lox",
+      "calibration": {
+        "min_ma": 4.0,
+        "max_ma": 20.0,
+        "min_psi": 0.0,
+        "max_psi": 10000.0,
+        "units": "psi"
+      }
+    },
+    {
+      "channel": 4,
+      "name": "LOX Engine Manifold",
+      "id": "PT5E",
+      "serial": "5A02FJW7H2V",
+      "group": "lox",
+      "calibration": {
+        "min_ma": 4.0,
+        "max_ma": 20.0,
+        "min_psi": 0.0,
+        "max_psi": 10000.0,
+        "units": "psi"
+      }
+    },
+    {
+      "channel": 5,
+      "name": "Fuel Reg Upstream",
+      "id": "PT6E",
+      "serial": "6A02FJW7H2V",
+      "group": "fuel",
+      "calibration": {
+        "min_ma": 4.0,
+        "max_ma": 20.0,
+        "min_psi": 0.0,
+        "max_psi": 10000.0,
+        "units": "psi"
+      }
+    },
+    {
+      "channel": 6,
+      "name": "Fuel Reg Downstream",
+      "id": "PT7E",
+      "serial": "7A02FJW7H2V",
+      "group": "fuel",
+      "calibration": {
+        "min_ma": 4.0,
+        "max_ma": 20.0,
+        "min_psi": 0.0,
+        "max_psi": 10000.0,
+        "units": "psi"
+      }
+    },
+    {
+      "channel": 7,
+      "name": "Fuel Tank Upstream",
+      "id": "PT8E",
+      "serial": "8A02FJW7H2V",
+      "group": "fuel",
+      "calibration": {
+        "min_ma": 4.0,
+        "max_ma": 20.0,
+        "min_psi": 0.0,
+        "max_psi": 10000.0,
+        "units": "psi"
+      }
+    },
+    {
+      "channel": 8,
+      "name": "Fuel Tank Downstream",
+      "id": "PT9E",
+      "serial": "9A02FJW7H2V",
+      "group": "fuel",
+      "calibration": {
+        "min_ma": 4.0,
+        "max_ma": 20.0,
+        "min_psi": 0.0,
+        "max_psi": 10000.0,
+        "units": "psi"
+      }
+    },
+    {
+      "channel": 9,
+      "name": "Fuel Engine Manifold",
+      "id": "PT10E",
+      "serial": "10A02FJW7H2V",
+      "group": "fuel",
+      "calibration": {
+        "min_ma": 4.0,
+        "max_ma": 20.0,
+        "min_psi": 0.0,
+        "max_psi": 10000.0,
+        "units": "psi"
+      }
+    },
+    {
+      "channel": 10,
+      "name": "Pneumatics",
+      "id": "PT11E",
+      "serial": "11A02FJW7H2V",
+      "group": "other",
+      "calibration": {
+        "min_ma": 4.0,
+        "max_ma": 20.0,
+        "min_psi": 0.0,
+        "max_psi": 10000.0,
+        "units": "psi"
+      }
+    },
+    {
+      "channel": 11,
+      "name": "Purge Bus",
+      "id": "PT12E",
+      "serial": "12A02FJW7H2V",
+      "group": "other",
+      "calibration": {
+        "min_ma": 4.0,
+        "max_ma": 20.0,
+        "min_psi": 0.0,
+        "max_psi": 10000.0,
+        "units": "psi"
+      }
+    },
+    {
+      "channel": 12,
+      "name": "Spare PT Channel 12",
+      "id": "PT13E",
+      "serial": "13A02FJW7H2V",
+      "group": "other",
+      "calibration": {
+        "min_ma": 4.0,
+        "max_ma": 20.0,
+        "min_psi": 0.0,
+        "max_psi": 10000.0,
+        "units": "psi"
+      }
+    },
+    {
+      "channel": 13,
+      "name": "Spare PT Channel 13",
+      "id": "PT14E",
+      "serial": "14A02FJW7H2V",
+      "group": "other",
+      "calibration": {
+        "min_ma": 4.0,
+        "max_ma": 20.0,
+        "min_psi": 0.0,
+        "max_psi": 10000.0,
+        "units": "psi"
+      }
+    },
+    {
+      "channel": 14,
+      "name": "Spare PT Channel 14",
+      "id": "PT15E",
+      "serial": "15A02FJW7H2V",
+      "group": "other",
+      "calibration": {
+        "min_ma": 4.0,
+        "max_ma": 20.0,
+        "min_psi": 0.0,
+        "max_psi": 10000.0,
+        "units": "psi"
+      }
+    },
+    {
+      "channel": 15,
+      "name": "Spare PT Channel 15",
+      "id": "PT16E",
+      "serial": "16A02FJW7H2V",
+      "group": "other",
+      "calibration": {
+        "min_ma": 4.0,
+        "max_ma": 20.0,
+        "min_psi": 0.0,
+        "max_psi": 10000.0,
+        "units": "psi"
+      }
+    }
+  ]
+} 

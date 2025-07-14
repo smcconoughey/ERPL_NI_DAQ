@@ -34,6 +34,16 @@ class DAQWebSocketServer {
     setupExpress() {
         this.app.use(express.static(path.join(__dirname, 'public')));
         
+        // Serve interface config file
+        this.app.get('/interface_config.json', (req, res) => {
+            res.sendFile(path.join(__dirname, 'interface_config.json'));
+        });
+        
+        // API route for config
+        this.app.get('/api/config', (req, res) => {
+            res.sendFile(path.join(__dirname, 'interface_config.json'));
+        });
+        
         this.app.get('/api/status', (req, res) => {
             res.json({
                 clients: this.clients.size,

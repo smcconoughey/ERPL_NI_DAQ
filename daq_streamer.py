@@ -100,6 +100,11 @@ class DAQStreamer:
                             else:
                                 # Unknown type - create default
                                 raw_data = [[0.0] for _ in range(device.channel_count)]
+
+                            # Ensure exactly 16 channels
+                            while len(raw_data) < device.channel_count:
+                                raw_data.append([0.0])
+                            raw_data = raw_data[:device.channel_count]
                             
                             # Process data through device-specific handler
                             processed_data = device.process_data(raw_data)

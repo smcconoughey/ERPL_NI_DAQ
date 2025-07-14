@@ -1,0 +1,3 @@
+@echo off
+echo Redirecting to start_system_main.bat...
+call start_system_main.bat 
