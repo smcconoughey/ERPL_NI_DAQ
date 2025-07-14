@@ -1,0 +1,6 @@
+nidaqmx==0.6.5
+grpcio==1.59.0
+grpcio-tools==1.59.0
+asyncio-mqtt==0.16.1
+redis==5.0.1
+websockets==12.0 
