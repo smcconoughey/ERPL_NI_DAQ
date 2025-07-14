@@ -8,7 +8,7 @@ const net = require('net');
 const path = require('path');
 
 const WEB_PORT = 3000;
-const TCP_PORT = 5000;
+const TCP_PORT = 5001;  // Updated to avoid port conflicts
 const MAX_CLIENTS = 100;
 const HEARTBEAT_INTERVAL = 30000;
 

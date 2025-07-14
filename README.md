@@ -10,64 +10,122 @@ A real-time data streaming system that connects NI-DAQmx hardware to web browser
 
 ## Features
 
-- Real-time data streaming from NI-DAQmx via gRPC
+- Real-time data streaming from NI-DAQmx hardware
 - WebSocket communication for low-latency browser updates
 - Modern web interface with live data visualization
+- Modular device configuration system
+- 16-channel PT card (NI-9208) current monitoring
 - Automatic reconnection and error handling
-- Simulated data mode for testing without hardware
+- Extensible device registry for future hardware
 
 ## Setup
 
-### Python Environment (using pyenv)
+### Option 1: Python Virtual Environment (Recommended)
 
-1. Install pyenv if not already installed
-2. Install Python 3.11.0:
+1. **Set up Python environment:**
    ```bash
-   pyenv install 3.11.0
-   pyenv local 3.11.0
+   .\setup_python_env.bat
    ```
 
-3. Install Python dependencies:
+   This will:
+   - Auto-detect if you have pyenv-win or system Python
+   - Create a virtual environment (`venv/`)
+   - Install all Python dependencies in isolation
+   - Set up the proper environment for DAQ development
+
+2. **If you want pyenv-win for better Python management:**
+   ```bash
+   .\install_pyenv_win.bat
+   ```
+
+   Then restart terminal and run `setup_python_env.bat`
+
+### Option 2: System Python (Basic Setup)
+
+1. **Run the basic setup script:**
+   ```bash
+   .\setup.bat
+   ```
+
+   This will:
+   - Check if Python and Node.js are installed
+   - Install all dependencies globally
+   - Verify system requirements
+
+### Prerequisites
+
+- **Python**: Download from [python.org](https://python.org/downloads) 
+  - ⚠️ **IMPORTANT**: Check "Add Python to PATH" during installation
+- **Node.js**: Download from [nodejs.org](https://nodejs.org)
+
+### Manual Setup
+
+1. **Install Python dependencies:**
    ```bash
    pip install -r requirements.txt
    ```
 
-### Node.js Environment
-
-1. Install Node.js dependencies:
+2. **Install Node.js dependencies:**
    ```bash
    npm install
    ```
 
 ## Usage
 
-### Start the Node.js WebSocket Server
-
+**Start System:**
 ```bash
-npm start
+.\start_system.bat
 ```
 
-The web interface will be available at `http://localhost:3000`
-
-### Start the Python DAQ Streamer
-
+**Shutdown System:**
 ```bash
-python daq_streamer.py
+.\shutdown_system.bat
 ```
+
+**Development Mode:**
+```bash
+.\dev_start.bat
+```
+
+### Manual Start
+
+1. **Activate virtual environment (if using):**
+   ```bash
+   call venv\Scripts\activate.bat
+   ```
+
+2. **Start Node.js server:**
+   ```bash
+   npm start
+   ```
+
+3. **Start Python streamer:**
+   ```bash
+   python daq_streamer.py
+   ```
+
+**Web Interface:** `http://localhost:3000`
 
 The system will:
-- Attempt to connect to NI-DAQmx gRPC service on localhost:31763
-- Fall back to simulated data if DAQ hardware is not available
+- Connect to NI-DAQmx hardware at 192.168.8.236
+- Stream 16-channel current data from PT card (NI-9208)
 - Send data to the Node.js server via TCP on port 5000
 
 ## Configuration
 
-### Python DAQ Streamer (`daq_streamer.py`)
+### Configuration (`config.py`)
 
-- `grpc_host`: NI-DAQmx gRPC server host (default: localhost)
-- `grpc_port`: NI-DAQmx gRPC server port (default: 31763)
-- `node_host`: Node.js server host (default: localhost)
-- `node_port`: Node.js TCP port (default: 5000)
+- `DAQ_HOST`: NI-DAQmx hardware IP address (default: 192.168.8.236)
+- `NODE_HOST`: Node.js server host (default: localhost)
+- `NODE_TCP_PORT`: Node.js TCP port (default: 5000)
+- `DEVICE_CHASSIS`: DAQ chassis name (default: cDAQ9189)
+- `ACTIVE_DEVICES`: List of active device modules (default: ["pt_card"])
+
+### Adding New Devices
+
+1. Create new device class in `devices/` extending `BaseDevice`
+2. Register device in `devices/device_registry.py`
+3. Add to `ACTIVE_DEVICES` list in `config.py`
 
 ### Node.js WebSocket Server (`server.js`)
 
@@ -90,9 +148,17 @@ npm run dev
 
 ## Troubleshooting
 
-1. **Connection refused**: Start Node.js server before Python streamer
-2. **DAQ not found**: Check NI-DAQmx gRPC service on specified port
-3. **WebSocket connection failed**: Check firewall and server accessibility
+1. **"Cannot keep up with hardware acquisition"**: The system will automatically optimize buffer sizes and read rates
+2. **"Resource is reserved"**: Another application may be using the DAQ device - close NI MAX or other DAQ software
+3. **Connection refused**: Use start_system.bat which starts services in the correct order
+4. **DAQ not found**: Check NI-DAQmx Runtime installation and hardware connection (IP: 192.168.8.236)
+5. **WebSocket connection failed**: Check firewall and ensure no other services are using port 3000
+
+### System Management
+
+- **Start**: Run `start_system.bat` - it will check all dependencies and start services properly
+- **Stop**: Run `shutdown_system.bat` - it will cleanly stop all DAQ services
+- **Monitor**: Both services run in separate windows showing real-time status and errors
 
 ## License
 

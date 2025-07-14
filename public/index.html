@@ -80,38 +80,52 @@
         }
 
         .data-container {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
             margin-bottom: 20px;
         }
 
-        .data-panel {
+        .device-panel {
             background-color: #2a2a2a;
             padding: 20px;
             border-radius: 8px;
             border: 1px solid #333;
+            margin-bottom: 20px;
         }
 
-        .data-panel h3 {
+        .device-panel h2 {
             color: #4CAF50;
-            margin-bottom: 15px;
-            font-size: 1.3em;
+            margin-bottom: 20px;
+            font-size: 1.5em;
+            text-align: center;
         }
 
-        .data-value {
-            font-size: 2em;
+        .channels-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+
+        .channel-card {
+            background-color: #1a1a1a;
+            padding: 15px;
+            border-radius: 5px;
+            border: 1px solid #333;
+            text-align: center;
+        }
+
+        .channel-card h4 {
+            color: #4CAF50;
+            margin-bottom: 10px;
+            font-size: 1.1em;
+        }
+
+        .channel-value {
+            font-size: 1.8em;
             font-weight: bold;
             color: #fff;
-            text-align: center;
-            padding: 20px;
-            background-color: #1a1a1a;
-            border-radius: 5px;
-            margin-bottom: 10px;
+            margin-bottom: 5px;
         }
 
-        .data-label {
-            text-align: center;
+        .channel-label {
             color: #888;
             font-size: 0.9em;
         }
@@ -189,13 +203,17 @@
         }
 
         @media (max-width: 768px) {
-            .data-container {
-                grid-template-columns: 1fr;
+            .channels-grid {
+                grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
             }
             
             .status-bar {
                 flex-direction: column;
                 gap: 10px;
+            }
+            
+            .channel-value {
+                font-size: 1.4em;
             }
         }
     </style>
@@ -226,16 +244,12 @@
             </div>
         </div>
 
-        <div class="data-container">
-            <div class="data-panel">
-                <h3>Channel 0</h3>
-                <div class="data-value" id="channel0">--</div>
-                <div class="data-label">Voltage (V)</div>
-            </div>
-            <div class="data-panel">
-                <h3>Channel 1</h3>
-                <div class="data-value" id="channel1">--</div>
-                <div class="data-label">Voltage (V)</div>
+        <div class="data-container" id="deviceContainer">
+            <div class="device-panel">
+                <h2>PT Card (NI-9208) - 16 Channel Current Monitor</h2>
+                <div class="channels-grid" id="ptCardChannels">
+                    <!-- Channels will be populated by JavaScript -->
+                </div>
             </div>
         </div>
 
@@ -263,11 +277,26 @@
         const messageCountEl = document.getElementById('messageCount');
         const sampleRateEl = document.getElementById('sampleRate');
         const uptimeEl = document.getElementById('uptime');
-        const channel0El = document.getElementById('channel0');
-        const channel1El = document.getElementById('channel1');
         const streamEl = document.getElementById('stream');
         const connectBtn = document.getElementById('connectBtn');
         const disconnectBtn = document.getElementById('disconnectBtn');
+        const ptCardChannels = document.getElementById('ptCardChannels');
+        
+        // Initialize PT card channel displays
+        function initializePTCardChannels() {
+            for (let i = 0; i < 16; i++) {
+                const channelCard = document.createElement('div');
+                channelCard.className = 'channel-card';
+                channelCard.innerHTML = `
+                    <h4>Channel ${i.toString().padStart(2, '0')}</h4>
+                    <div class="channel-value" id="ptCh${i.toString().padStart(2, '0')}">--</div>
+                    <div class="channel-label">mA</div>
+                `;
+                ptCardChannels.appendChild(channelCard);
+            }
+        }
+        
+        initializePTCardChannels();
 
         function connectWebSocket() {
             try {
@@ -342,11 +371,26 @@
             messageCount++;
             messageCountEl.textContent = messageCount;
             
-            if (data.channel_0 !== undefined) {
-                channel0El.textContent = data.channel_0.toFixed(3);
-            }
-            if (data.channel_1 !== undefined) {
-                channel1El.textContent = data.channel_1.toFixed(3);
+            // Handle PT card data
+            if (data.device_type === 'pt_card' && data.channels) {
+                for (let i = 0; i < 16; i++) {
+                    const channelKey = `ch${i.toString().padStart(2, '0')}_current_ma`;
+                    const channelEl = document.getElementById(`ptCh${i.toString().padStart(2, '0')}`);
+                    
+                    if (data.channels[channelKey] !== undefined && channelEl) {
+                        const value = data.channels[channelKey];
+                        channelEl.textContent = value.toFixed(2);
+                        
+                        // Color code based on current magnitude
+                        if (Math.abs(value) > 15) {
+                            channelEl.style.color = '#f44336'; // Red for high current
+                        } else if (Math.abs(value) > 10) {
+                            channelEl.style.color = '#ff9800'; // Orange for medium current
+                        } else {
+                            channelEl.style.color = '#4CAF50'; // Green for low current
+                        }
+                    }
+                }
             }
             
             const now = Date.now();
@@ -363,10 +407,20 @@
             }
             
             const timestamp = new Date(data.timestamp * 1000).toLocaleTimeString();
-            const streamText = `[${timestamp}] Ch0: ${data.channel_0?.toFixed(3)} V, Ch1: ${data.channel_1?.toFixed(3)} V`;
-            if (data.status) {
-                streamText += ` (${data.status})`;
+            let streamText = `[${timestamp}] ${data.device_type}: `;
+            
+            if (data.device_type === 'pt_card') {
+                const channels = data.channels || {};
+                const activeChannels = Object.keys(channels)
+                    .filter(key => key.includes('_current_ma'))
+                    .slice(0, 4) // Show first 4 channels in stream
+                    .map(key => {
+                        const chNum = key.substring(2, 4);
+                        return `Ch${chNum}:${channels[key].toFixed(2)}mA`;
+                    });
+                streamText += activeChannels.join(', ');
             }
+            
             addToStream(streamText);
         }
 
