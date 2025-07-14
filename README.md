@@ -22,6 +22,8 @@ A real-time data streaming system that connects NI-DAQmx hardware to web browser
 
 ## Setup
 
+### Step 0: Install daq-mx/ NI MAX, ensure good connection with the daq and find the IP address
+
 ### Option 1: Python Virtual Environment (Recommended)
 
 1. **Set up Python environment:**
