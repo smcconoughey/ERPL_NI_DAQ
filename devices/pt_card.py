@@ -9,10 +9,12 @@ import os
 class PTCard(BaseDevice):
     """NI-9208 16-channel current measurement configuration"""
     
-    def __init__(self, device_name):
-        super().__init__(device_name, 16)
-        self.sample_rate = 100
-        self.samples_per_channel = 10
+    def __init__(self, chassis: str, module_slot: int):
+        super().__init__(chassis, module_slot)
+        self.device_name = self.module_name
+        self.channel_count = 16
+        self.sample_rate = 500
+        self.samples_per_channel = 500
         self.load_config()
     
     def load_config(self):
@@ -27,21 +29,31 @@ class PTCard(BaseDevice):
             print(f"Warning: Could not load sensor config: {e}")
             self.sensor_config = {}
     
-    def configure_task(self, task):
+    def configure_channels(self, task: nidaqmx.Task) -> None:
         channels = f"{self.device_name}/ai0:{self.channel_count-1}"
         
         task.ai_channels.add_ai_current_chan(
             channels,
-            min_val=0.004,
-            max_val=0.020,
+            min_val=-0.022,
+            max_val=0.022,
             terminal_config=TerminalConfiguration.DEFAULT
         )
-        
+    
+    def configure_timing(self, task: nidaqmx.Task) -> None:
         task.timing.cfg_samp_clk_timing(
             rate=self.sample_rate,
             sample_mode=AcquisitionType.FINITE,
             samps_per_chan=self.samples_per_channel
         )
+    
+    @property
+    def device_info(self) -> Dict[str, Any]:
+        return {
+            'device_type': 'PT Card (NI-9208)',
+            'module': self.module_name,
+            'channels': self.channel_count,
+            'sample_rate': self.sample_rate
+        }
     
     def convert_to_pressure(self, current_ma, channel):
         if channel in self.sensor_config:
@@ -55,10 +67,11 @@ class PTCard(BaseDevice):
             max_psi = cal['max_psi']  # Changed from max_ksi
             
             psi = min_psi + (current_ma - min_ma) * (max_psi - min_psi) / (max_ma - min_ma)
-            return psi
+            return max(0.0, psi)  # Clamp to minimum 0 PSI
         else:
             # Default conversion for unconfigured channels
-            return 0.0 + (current_ma - 4.0) * (10000.0 - 0.0) / (20.0 - 4.0)
+            default_psi = 0.0 + (current_ma - 4.0) * (10000.0 - 0.0) / (20.0 - 4.0)
+            return max(0.0, default_psi)
     
     def get_sensor_info(self, channel):
         if channel in self.sensor_config:
@@ -75,12 +88,14 @@ class PTCard(BaseDevice):
                 'group': 'other'
             }
     
-    def process_data(self, raw_data):
+    def process_data(self, raw_data: List[List[float]]) -> Dict[str, Any]:
         if isinstance(raw_data, list) and len(raw_data) > 0 and isinstance(raw_data[0], list):
             processed_channels = []
             for channel_idx, channel_data in enumerate(raw_data):
                 if len(channel_data) > 0:
-                    current_ma = channel_data[-1] * 1000
+                    # Average the samples for better noise reduction
+                    avg_current = sum(channel_data) / len(channel_data)
+                    current_ma = avg_current * 1000
                     psi = self.convert_to_pressure(current_ma, channel_idx)  # Changed from ksi
                     sensor_info = self.get_sensor_info(channel_idx)
                     
@@ -93,6 +108,6 @@ class PTCard(BaseDevice):
                         'pressure_psi': round(psi, 2),  # Changed from pressure_ksi
                         'units': 'psi'  # Changed from ksi
                     })
-            return processed_channels
+            return {'channels': processed_channels}
         else:
-            return [] 
+            return {'channels': []} 

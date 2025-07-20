@@ -76,6 +76,16 @@ class DAQStreamer:
                             # Handle data format - ensure we have list of lists for multi-channel
                             logger.info(f"Raw data type: {type(raw_data)}, length: {len(raw_data) if hasattr(raw_data, '__len__') else 'N/A'}")
                             
+                            # Debug: Log average raw current for first 5 channels every 10 readings
+                            if 'read_count' not in locals():
+                                read_count = 0
+                            read_count += 1
+                            if read_count % 10 == 0:
+                                for ch in range(min(5, len(raw_data))):
+                                    if raw_data[ch]:
+                                        avg = sum(raw_data[ch]) / len(raw_data[ch])
+                                        logger.info(f"Channel {ch} avg raw current: {avg:.6f} A")
+                            
                             if isinstance(raw_data, (int, float)):
                                 # Single value - create 16 channels with same value
                                 raw_data = [[raw_data] for _ in range(device.channel_count)]

@@ -17,11 +17,12 @@
       "id": "PT1E",
       "serial": "1A02FJW7H2V",
       "group": "lox",
+      
       "calibration": {
         "min_ma": 4.0,
         "max_ma": 20.0,
         "min_psi": 0.0,
-        "max_psi": 10000.0,
+        "max_psi": 500.0,
         "units": "psi"
       }
     },

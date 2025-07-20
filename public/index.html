@@ -386,9 +386,9 @@
             }
 
             updateSensorData(data) {
-                if (!Array.isArray(data)) return;
+                if (data.type !== 'data' || !data.data || !Array.isArray(data.data.channels)) return;
 
-                data.forEach(sensor => {
+                data.data.channels.forEach(sensor => {
                     const element = document.getElementById(`sensor-${sensor.channel}`);
                     if (element) {
                         const valueElement = element.querySelector('.sensor-value');

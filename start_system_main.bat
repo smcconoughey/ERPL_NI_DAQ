@@ -19,19 +19,19 @@ echo ================================
 echo   System Started Successfully
 echo ================================
 echo.
-echo 📊 Web Interface:     http://localhost:3000
-echo 🔧 DAQ Hardware:      192.168.8.236 (cDAQ9189-2462EFD)
-echo 📡 WebSocket Port:    3000
-echo 🔌 TCP Data Port:     5001
+echo Web Interface:     http://localhost:3000
+echo DAQ Hardware:      192.168.8.236 (cDAQ9189-2462EFD)
+echo WebSocket Port:    3000
+echo TCP Data Port:     5001
 echo.
-echo 📋 Interface Features:
-echo   • 70%% P^&ID diagram area (placeholder)
-echo   • 30%% live sensor data (grouped by system)
-echo   • High-contrast light mode for outdoor viewing
-echo   • 16-channel PT monitoring (4-20mA to ksi)
+echo Interface Features:
+echo   - 70% P&ID diagram area (placeholder)
+echo   - 30% live sensor data (grouped by system)
+echo   - High-contrast light mode for outdoor viewing
+echo   - 16-channel PT monitoring (4-20mA to ksi)
 echo.
-echo 💡 Both services are running in separate windows
-echo 🛑 Use shutdown_system.bat to stop cleanly
+echo Both services are running in separate windows
+echo Use shutdown_system.bat to stop cleanly
 echo.
 echo Opening web interface...
 start http://localhost:3000
