@@ -60,17 +60,17 @@ class PTCard(BaseDevice):
             config = self.sensor_config[channel]
             cal = config['calibration']
             
-            # Linear interpolation from 4-20mA to PSI (changed from ksi)
-            min_ma = cal['min_ma']
-            max_ma = cal['max_ma']
-            min_psi = cal['min_psi']  # Changed from min_ksi
-            max_psi = cal['max_psi']  # Changed from max_ksi
+            # Linear interpolation with zero calibration
+            zero_ma = cal.get('zero_ma', 4.0)
+            span_ma = 16.0  # Fixed span assuming 4-20mA nominal
+            min_psi = 0.0
+            max_psi = cal['max_psi']
             
-            psi = min_psi + (current_ma - min_ma) * (max_psi - min_psi) / (max_ma - min_ma)
+            psi = (current_ma - zero_ma) * (max_psi / span_ma)
             return max(0.0, psi)  # Clamp to minimum 0 PSI
         else:
             # Default conversion for unconfigured channels
-            default_psi = 0.0 + (current_ma - 4.0) * (10000.0 - 0.0) / (20.0 - 4.0)
+            default_psi = (current_ma - 4.0) * (10000.0 / 16.0)
             return max(0.0, default_psi)
     
     def get_sensor_info(self, channel):
