@@ -55,7 +55,30 @@ class DAQStreamer:
                     # Configure device channels and timing
                     device.configure_channels(task)
                     device.configure_timing(task)
-                    
+
+                    # Acquire a baseline reading for taring
+                    task.start()
+                    baseline = task.read(number_of_samples_per_channel=nidaqmx.constants.READ_ALL_AVAILABLE,
+                                          timeout=2.0)
+                    task.stop()
+
+                    # Format baseline data similar to normal processing
+                    if isinstance(baseline, (int, float)):
+                        baseline = [[baseline] for _ in range(device.channel_count)]
+                    elif isinstance(baseline, list) and baseline and not isinstance(baseline[0], list):
+                        if len(baseline) == device.channel_count:
+                            baseline = [[val] for val in baseline]
+                        elif len(baseline) % device.channel_count == 0:
+                            samples_per_chan = len(baseline) // device.channel_count
+                            baseline = [baseline[i::device.channel_count] for i in range(device.channel_count)]
+                        else:
+                            vals_per_chan = len(baseline) // device.channel_count + 1
+                            baseline = [baseline[i:i+vals_per_chan] if i < len(baseline) else [0.0]
+                                       for i in range(0, device.channel_count)]
+                    elif isinstance(baseline, list) and not baseline:
+                        baseline = [[0.0] for _ in range(device.channel_count)]
+                    device.tare(baseline)
+
                     logger.info(f"Starting {device.device_info['device_type']} on {device.module_name}")
                     # Don't start task here - start/stop for each finite acquisition
                     
