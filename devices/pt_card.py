@@ -15,6 +15,8 @@ class PTCard(BaseDevice):
         self.channel_count = 16
         self.sample_rate = 500
         self.samples_per_channel = 500
+        self.tare_offset = 0.0
+        self.tared = False
         self.load_config()
     
     def load_config(self):
@@ -28,6 +30,38 @@ class PTCard(BaseDevice):
         except Exception as e:
             print(f"Warning: Could not load sensor config: {e}")
             self.sensor_config = {}
+
+    def tare(self, baseline_raw_data: List[List[float]], ambient_psi: float = 14.7) -> None:
+        """Calculate a tare offset so all sensors read ambient_psi at rest."""
+        psi_values = []
+        for ch in range(min(self.channel_count, len(baseline_raw_data))):
+            data = baseline_raw_data[ch]
+            if not data:
+                continue
+            avg_current = sum(data) / len(data)
+            current_ma = avg_current * 1000
+            # convert without any existing tare offset
+            psi = self._convert_no_tare(current_ma, ch)
+            psi_values.append(psi)
+
+        if psi_values:
+            mean_psi = sum(psi_values) / len(psi_values)
+            self.tare_offset = mean_psi - ambient_psi
+            self.tared = True
+
+    def _convert_no_tare(self, current_ma, channel):
+        if channel in self.sensor_config:
+            config = self.sensor_config[channel]
+            cal = config['calibration']
+
+            zero_ma = cal.get('zero_ma', 4.0)
+            span_ma = 16.0
+            max_psi = cal['max_psi']
+
+            psi = (current_ma - zero_ma) * (max_psi / span_ma)
+            return psi
+        else:
+            return (current_ma - 4.0) * (10000.0 / 16.0)
     
     def configure_channels(self, task: nidaqmx.Task) -> None:
         channels = f"{self.device_name}/ai0:{self.channel_count-1}"
@@ -67,10 +101,12 @@ class PTCard(BaseDevice):
             max_psi = cal['max_psi']
             
             psi = (current_ma - zero_ma) * (max_psi / span_ma)
+            psi -= self.tare_offset
             return max(0.0, psi)  # Clamp to minimum 0 PSI
         else:
             # Default conversion for unconfigured channels
             default_psi = (current_ma - 4.0) * (10000.0 / 16.0)
+            default_psi -= self.tare_offset
             return max(0.0, default_psi)
     
     def get_sensor_info(self, channel):

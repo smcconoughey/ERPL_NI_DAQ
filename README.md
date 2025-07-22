@@ -17,6 +17,7 @@ A real-time data streaming system that connects NI-DAQmx hardware to web browser
 - 16-channel PT card (NI-9208) with 4-20mA to ksi conversion
 - Grouped sensor display: LOX (blue), Fuel (orange), Other (green)
 - JSON-based sensor configuration system
+- Runtime "tare" feature aligns all sensors to ambient pressure (14.7 psi)
 - Automatic reconnection and error handling
 - Modular device configuration system
 
