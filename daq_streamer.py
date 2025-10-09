@@ -9,7 +9,19 @@ import logging
 import threading
 from typing import AsyncGenerator, Dict, Any
 import nidaqmx
-from config import DAQ_HOST, DAQ_GRPC_PORT, NODE_HOST, NODE_TCP_PORT, DEVICE_CHASSIS, ACTIVE_DEVICES
+from config import (
+    DAQ_HOST,
+    DAQ_GRPC_PORT,
+    NODE_HOST,
+    NODE_TCP_PORT,
+    DEVICE_CHASSIS,
+    ACTIVE_DEVICES,
+    MODULE_SLOT,
+    DEBUG_ENABLE,
+    DEBUG_RAW_SUMMARY,
+    DEBUG_RAW_SAMPLES,
+    DEBUG_SAMPLE_EVERY_N,
+)
 from devices.device_registry import DeviceRegistry
 
 logging.basicConfig(level=logging.INFO)
@@ -29,9 +41,18 @@ class DAQStreamer:
         """Initialize configured devices"""
         for device_name in ACTIVE_DEVICES:
             try:
-                device = DeviceRegistry.create_device(device_name, DEVICE_CHASSIS, module_slot=1)
+                device = DeviceRegistry.create_device(device_name, DEVICE_CHASSIS, module_slot=MODULE_SLOT)
                 self.devices.append(device)
                 logger.info(f"Initialized {device.device_info['device_type']}: {device.module_name}")
+                # Warmup details
+                try:
+                    info = getattr(device, 'device_info', {})
+                    product = getattr(device, 'product_type', 'Unknown')
+                    logger.info(f"Module selected: {device.module_name} ({product})")
+                    if hasattr(device, 'sensor_config'):
+                        logger.info(f"Sensors configured: {len(getattr(device, 'sensor_config', {}))}")
+                except Exception:
+                    pass
             except ValueError as e:
                 logger.error(f"Failed to initialize device {device_name}: {e}")
                 
@@ -43,10 +64,22 @@ class DAQStreamer:
                 import nidaqmx.system
                 system = nidaqmx.system.System.local()
                 # Reset the device to clear any reserved resources
-                device_name = device.module_name.split('/')[0]  # Get chassis name
-                system.devices[device_name].reset_device()
-                logger.info(f"Reset device {device_name} to clear reserved resources")
-                time.sleep(1)  # Allow device to reset
+                # Prefer resetting the chassis; fall back to the module if needed
+                target_names = [device.chassis, device.module_name]
+                reset_done = False
+                for name in target_names:
+                    try:
+                        system.devices[name].reset_device()
+                        logger.info(f"Reset device {name} to clear reserved resources")
+                        reset_done = True
+                        break
+                    except Exception:
+                        continue
+                if not reset_done:
+                    available = [d.name for d in system.devices]
+                    logger.warning(f"Could not reset device. Tried {target_names}. Available: {available}")
+                else:
+                    time.sleep(1)  # Allow device to reset
             except Exception as e:
                 logger.warning(f"Could not reset device: {e}")
                 
@@ -78,6 +111,11 @@ class DAQStreamer:
                     elif isinstance(baseline, list) and not baseline:
                         baseline = [[0.0] for _ in range(device.channel_count)]
                     device.tare(baseline)
+                    if DEBUG_ENABLE:
+                        try:
+                            logger.info(f"Tare complete. Offset applied: {getattr(device, 'tare_offset', 0.0):.3f} psi")
+                        except Exception:
+                            pass
 
                     logger.info(f"Starting {device.device_info['device_type']} on {device.module_name}")
                     # Don't start task here - start/stop for each finite acquisition
@@ -99,15 +137,29 @@ class DAQStreamer:
                             # Handle data format - ensure we have list of lists for multi-channel
                             logger.info(f"Raw data type: {type(raw_data)}, length: {len(raw_data) if hasattr(raw_data, '__len__') else 'N/A'}")
                             
-                            # Debug: Log average raw current for first 5 channels every 10 readings
+                            # Optional raw debug logs
                             if 'read_count' not in locals():
                                 read_count = 0
                             read_count += 1
-                            if read_count % 10 == 0:
-                                for ch in range(min(5, len(raw_data))):
-                                    if raw_data[ch]:
-                                        avg = sum(raw_data[ch]) / len(raw_data[ch])
-                                        logger.info(f"Channel {ch} avg raw current: {avg:.6f} A")
+                            if DEBUG_ENABLE and isinstance(raw_data, list) and raw_data:
+                                if DEBUG_RAW_SUMMARY and (read_count % max(1, DEBUG_SAMPLE_EVERY_N) == 0):
+                                    max_channels = min(8, len(raw_data))
+                                    for ch in range(max_channels):
+                                        samples = raw_data[ch]
+                                        if not samples:
+                                            continue
+                                        avg_a = sum(samples) / len(samples)
+                                        min_a = min(samples)
+                                        max_a = max(samples)
+                                        logger.info(
+                                            f"ch{ch:02d} A(avg/min/max)="
+                                            f"{avg_a:.6f}/{min_a:.6f}/{max_a:.6f}  "
+                                            f"mA(avg)={(avg_a*1000):.3f}  n={len(samples)}"
+                                        )
+                                if DEBUG_RAW_SAMPLES and (read_count % max(1, DEBUG_SAMPLE_EVERY_N) == 0):
+                                    for ch in range(min(2, len(raw_data))):
+                                        samples = raw_data[ch][:10]
+                                        logger.info(f"ch{ch:02d} first samples (A): {samples}")
                             
                             if isinstance(raw_data, (int, float)):
                                 # Single value - create 16 channels with same value

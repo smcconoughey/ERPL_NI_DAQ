@@ -30,13 +30,24 @@ def check_daq_status():
                 if DEVICE_CHASSIS in device.name:
                     print(f"    ✓ TARGET DEVICE FOUND: {device.name}")
                     
-                    # Try to create a simple task to test availability
+                    # Probe for NI-9208 and NI-9237 modules explicitly with proper channel types
                     try:
                         with nidaqmx.Task() as test_task:
-                            test_task.ai_channels.add_ai_voltage_chan(f"{device.name}Mod1/ai0")
-                            print("    ✓ Device is available (no resource conflicts)")
+                            found_any = False
+                            for mod in system.devices:
+                                if mod.name.startswith(device.name + "Mod"):
+                                    if "9208" in mod.product_type:
+                                        # Current measurement
+                                        test_task.ai_channels.add_ai_current_chan(f"{mod.name}/ai0")
+                                        found_any = True
+                                        print(f"    ✓ NI-9208 OK: {mod.name} ai0 current")
+                                    elif "9237" in mod.product_type:
+                                        # Bridge/strain module expects bridge types, not plain voltage/current
+                                        print(f"    ℹ︎ NI-9237 detected: {mod.name} (bridge/strain). Skipping current/voltage test.")
+                            if not found_any:
+                                print("    ⚠️ No NI-9208 module detected on this chassis.")
                     except Exception as e:
-                        print(f"    ❌ Device resource error: {e}")
+                        print(f"    ❌ Module probe error: {e}")
                         print("    💡 Try closing NI MAX or other DAQ applications")
                         
                         # Try to reset the device

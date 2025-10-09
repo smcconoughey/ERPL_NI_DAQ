@@ -5,13 +5,35 @@ from typing import Dict, List, Any
 from .base_device import BaseDevice
 import json
 import os
+import nidaqmx.system
+import logging
+
+logger = logging.getLogger(__name__)
 
 class PTCard(BaseDevice):
     """NI-9208 16-channel current measurement configuration"""
     
     def __init__(self, chassis: str, module_slot: int):
         super().__init__(chassis, module_slot)
+        # Prefer autodetected NI-9208 module on the chassis; fall back to provided slot
         self.device_name = self.module_name
+        self.product_type = "Unknown"
+        try:
+            system = nidaqmx.system.System.local()
+            for dev in system.devices:
+                if dev.name.startswith(chassis) and "9208" in dev.product_type:
+                    self.module_name = dev.name
+                    # Update slot from autodetected module name suffix '...ModN'
+                    try:
+                        self.module_slot = int(dev.name.split('Mod')[-1])
+                    except Exception:
+                        pass
+                    self.device_name = self.module_name
+                    self.product_type = dev.product_type
+                    break
+        except Exception:
+            # If autodetection fails, keep the provided module slot
+            pass
         self.channel_count = 16
         self.sample_rate = 500
         self.samples_per_channel = 500
@@ -27,27 +49,39 @@ class PTCard(BaseDevice):
             
             # Changed from pt_sensors to sensors
             self.sensor_config = {sensor['channel']: sensor for sensor in config['sensors']}
+            logger.info(f"Loaded {len(self.sensor_config)} PT sensor configs from interface_config.json")
         except Exception as e:
-            print(f"Warning: Could not load sensor config: {e}")
+            logger.warning(f"Could not load sensor config: {e}")
             self.sensor_config = {}
 
     def tare(self, baseline_raw_data: List[List[float]], ambient_psi: float = 14.7) -> None:
         """Calculate a tare offset so all sensors read ambient_psi at rest."""
         psi_values = []
+        included_channels = 0
+        excluded_channels = 0
         for ch in range(min(self.channel_count, len(baseline_raw_data))):
             data = baseline_raw_data[ch]
             if not data:
                 continue
             avg_current = sum(data) / len(data)
             current_ma = avg_current * 1000
+            # Ignore clearly disconnected/out-of-range channels for tare computation
+            if current_ma < 3.0 or current_ma > 25.0:
+                excluded_channels += 1
+                continue
             # convert without any existing tare offset
             psi = self._convert_no_tare(current_ma, ch)
             psi_values.append(psi)
+            included_channels += 1
 
         if psi_values:
             mean_psi = sum(psi_values) / len(psi_values)
             self.tare_offset = mean_psi - ambient_psi
             self.tared = True
+            logger.info(f"Tare used {included_channels} channels (excluded {excluded_channels}) -> offset {self.tare_offset:.3f} psi")
+        else:
+            logger.warning("Tare skipped: no valid channels in 3-25 mA range detected")
+            self.tared = False
 
     def _convert_no_tare(self, current_ma, channel):
         if channel in self.sensor_config:
@@ -132,7 +166,10 @@ class PTCard(BaseDevice):
                     # Average the samples for better noise reduction
                     avg_current = sum(channel_data) / len(channel_data)
                     current_ma = avg_current * 1000
-                    psi = self.convert_to_pressure(current_ma, channel_idx)  # Changed from ksi
+                    status = 'ok'
+                    if current_ma < 3.0 or current_ma > 25.0:
+                        status = 'disconnected'
+                    psi = self.convert_to_pressure(current_ma, channel_idx) if status == 'ok' else 0.0
                     sensor_info = self.get_sensor_info(channel_idx)
                     
                     processed_channels.append({
@@ -141,6 +178,7 @@ class PTCard(BaseDevice):
                         'id': sensor_info['id'],
                         'group': sensor_info['group'],
                         'current_ma': round(current_ma, 2),
+                        'status': status,
                         'pressure_psi': round(psi, 2),  # Changed from pressure_ksi
                         'units': 'psi'  # Changed from ksi
                     })

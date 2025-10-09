@@ -317,7 +317,7 @@
                     <div class="sensor-name">${sensor.name}</div>
                     <div class="sensor-value">---.--</div>
                     <div class="sensor-units">PSI</div>
-                    <div class="sensor-details">Ch${sensor.channel} • ${sensor.id}</div>
+                    <div class="sensor-details">Ch${sensor.channel} • ${sensor.id} • <span class="sensor-current">--.- mA</span> • <span class="sensor-state">OK</span></div>
                 `;
                 return div;
             }
@@ -390,12 +390,26 @@
 
                 data.data.channels.forEach(sensor => {
                     const element = document.getElementById(`sensor-${sensor.channel}`);
-                    if (element) {
-                        const valueElement = element.querySelector('.sensor-value');
-                        // Changed from pressure_ksi to pressure_psi
-                        valueElement.textContent = sensor.pressure_psi.toFixed(2);
-                        
+                    if (!element) return;
+
+                    const valueElement = element.querySelector('.sensor-value');
+                    const currentEl = element.querySelector('.sensor-current');
+                    const stateEl = element.querySelector('.sensor-state');
+
+                    // Update current readout
+                    if (currentEl && typeof sensor.current_ma === 'number') {
+                        currentEl.textContent = `${sensor.current_ma.toFixed(1)} mA`;
+                    }
+
+                    // Update state and pressure
+                    if (sensor.status === 'disconnected') {
+                        valueElement.textContent = 'DISCONNECTED';
+                        element.classList.add('error');
+                        if (stateEl) stateEl.textContent = 'DISCONNECTED';
+                    } else {
+                        valueElement.textContent = Number(sensor.pressure_psi).toFixed(2);
                         element.classList.remove('error');
+                        if (stateEl) stateEl.textContent = 'OK';
                     }
                 });
             }
