@@ -2,8 +2,8 @@
   "interface": {
     "title": "ERPL DAQ Monitor",
     "layout": {
-      "pid_width_percent": 70,
-      "data_width_percent": 30
+      "pid_width_percent": 50,
+      "data_width_percent": 50
     },
     "theme": {
       "mode": "light",
@@ -19,7 +19,7 @@
       "group": "lox",
       
       "calibration": {
-        "max_psi": 500.0,
+        "max_psi": 10000.0,
         "zero_ma": 4.0,
         "units": "psi"
       }
@@ -31,7 +31,7 @@
       "serial": "2A02FJW7H2V",
       "group": "lox",
       "calibration": {
-        "max_psi": 10000.0,
+        "max_psi": 1500.0,
         "zero_ma": 4.0,
         "units": "psi"
       }
