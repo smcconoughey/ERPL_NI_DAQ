@@ -8,7 +8,7 @@ NODE_TCP_PORT = 5001
 DEBUG_ENABLE = True            # Master debug switch
 DEBUG_RAW_SUMMARY = True       # Log per-read summaries (min/max/avg per channel)
 DEBUG_RAW_SAMPLES = False      # Log a few raw samples per channel periodically
-DEBUG_SAMPLE_EVERY_N = 10      # How often to log raw samples (reads)
+DEBUG_SAMPLE_EVERY_N = 50      # How often to log raw samples (reads)
 
 # Device configuration
 DEVICE_CHASSIS = "cDAQ9189-2462EFD"  # Actual device name from NI MAX

@@ -6,6 +6,8 @@ const http = require('http');
 const WebSocket = require('ws');
 const net = require('net');
 const path = require('path');
+const fs = require('fs');
+const { createWriteStream } = require('fs');
 
 const WEB_PORT = 3000;
 const TCP_PORT = 5001;  // Updated to avoid port conflicts
@@ -24,6 +26,14 @@ class DAQWebSocketServer {
         this.clients = new Set();
         this.lastMessage = null;
         this.messageCount = 0;
+        
+        // CSV logging
+        this.loggingEnabled = false;
+        this.logStream = null;
+        this.logFilename = null;
+        this.logDataCount = 0;
+        this.logStartTime = null;
+        this.logHeader = null;
         
         this.setupExpress();
         this.setupWebSocket();
@@ -79,7 +89,24 @@ class DAQWebSocketServer {
             }
             
             ws.on('message', (message) => {
-                console.log('Received message from client:', message.toString());
+                try {
+                    const msg = JSON.parse(message.toString());
+                    
+                    if (msg.action === 'start_logging') {
+                        const result = this.startLogging();
+                        ws.send(JSON.stringify(result));
+                    } else if (msg.action === 'stop_logging') {
+                        const result = this.stopLogging();
+                        ws.send(JSON.stringify(result));
+                    } else if (msg.action === 'get_logging_status') {
+                        const result = this.getLoggingStatus();
+                        ws.send(JSON.stringify(result));
+                    } else {
+                        console.log('Received message from client:', message.toString());
+                    }
+                } catch (error) {
+                    console.error('Error handling client message:', error);
+                }
             });
             
             ws.on('close', () => {

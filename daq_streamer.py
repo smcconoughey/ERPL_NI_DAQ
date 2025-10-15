@@ -7,6 +7,9 @@ import socket
 import time
 import logging
 import threading
+import csv
+from datetime import datetime
+from pathlib import Path
 from typing import AsyncGenerator, Dict, Any
 import nidaqmx
 from config import (
@@ -33,6 +36,15 @@ class DAQStreamer:
         self.node_port = NODE_TCP_PORT
         self.running = False
         self.devices = []
+        
+        # CSV logging
+        self.logging_enabled = False
+        self.log_file = None
+        self.log_writer = None
+        self.log_filename = None
+        self.log_lock = threading.Lock()
+        self.log_data_count = 0
+        self.log_start_time = None
         
         # Initialize active devices
         self._initialize_devices()
@@ -88,34 +100,6 @@ class DAQStreamer:
                     # Configure device channels and timing
                     device.configure_channels(task)
                     device.configure_timing(task)
-
-                    # Acquire a baseline reading for taring
-                    task.start()
-                    baseline = task.read(number_of_samples_per_channel=nidaqmx.constants.READ_ALL_AVAILABLE,
-                                          timeout=2.0)
-                    task.stop()
-
-                    # Format baseline data similar to normal processing
-                    if isinstance(baseline, (int, float)):
-                        baseline = [[baseline] for _ in range(device.channel_count)]
-                    elif isinstance(baseline, list) and baseline and not isinstance(baseline[0], list):
-                        if len(baseline) == device.channel_count:
-                            baseline = [[val] for val in baseline]
-                        elif len(baseline) % device.channel_count == 0:
-                            samples_per_chan = len(baseline) // device.channel_count
-                            baseline = [baseline[i::device.channel_count] for i in range(device.channel_count)]
-                        else:
-                            vals_per_chan = len(baseline) // device.channel_count + 1
-                            baseline = [baseline[i:i+vals_per_chan] if i < len(baseline) else [0.0]
-                                       for i in range(0, device.channel_count)]
-                    elif isinstance(baseline, list) and not baseline:
-                        baseline = [[0.0] for _ in range(device.channel_count)]
-                    device.tare(baseline)
-                    if DEBUG_ENABLE:
-                        try:
-                            logger.info(f"Tare complete. Offset applied: {getattr(device, 'tare_offset', 0.0):.3f} psi")
-                        except Exception:
-                            pass
 
                     logger.info(f"Starting {device.device_info['device_type']} on {device.module_name}")
                     # Don't start task here - start/stop for each finite acquisition
@@ -195,6 +179,13 @@ class DAQStreamer:
                             processed_data = device.process_data(raw_data)
                             processed_data["timestamp"] = time.time()
                             
+                            # Log data if enabled
+                            if self.logging_enabled:
+                                try:
+                                    self._write_log_entry(processed_data)
+                                except Exception as e:
+                                    logger.error(f"Failed to write log entry: {e}")
+                            
                             # Send to Node.js server asynchronously
                             loop = asyncio.new_event_loop()
                             asyncio.set_event_loop(loop)
@@ -216,6 +207,138 @@ class DAQStreamer:
                 except Exception as e:
                     logger.error(f"Error configuring {device.module_name}: {e}")
                     continue
+    
+    def start_logging(self) -> Dict:
+        """Start CSV logging with timestamped filename"""
+        if self.logging_enabled:
+            return {"success": False, "message": "Logging already active", "filename": self.log_filename}
+        
+        try:
+            # Create folder named with date (MMDD)
+            now = datetime.now()
+            date_folder = now.strftime("%m%d")
+            log_dir = Path("logs") / date_folder
+            log_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Create filename with time (HHMM.csv)
+            time_str = now.strftime("%H%M")
+            log_path = log_dir / f"{time_str}.csv"
+            
+            # If file exists, append a number
+            counter = 1
+            while log_path.exists():
+                log_path = log_dir / f"{time_str}_{counter}.csv"
+                counter += 1
+            
+            self.log_file = open(log_path, 'w', newline='')
+            self.log_writer = csv.writer(self.log_file)
+            
+            # Write header dynamically based on active devices
+            header = ['timestamp', 'elapsed_ms']
+            
+            for device in self.devices:
+                device_type = device.device_info.get('device_type', '')
+                
+                if 'PT' in device_type or 'Pressure' in device_type:
+                    # PT Card has 16 channels
+                    for i in range(16):
+                        header.append(f'PT{i}_psi')
+                elif 'LC' in device_type or 'Load' in device_type:
+                    # LC Card has 4 channels
+                    for i in range(4):
+                        header.append(f'LC{i}_vv')
+            
+            self.log_writer.writerow(header)
+            self.log_file.flush()
+            
+            self.logging_enabled = True
+            self.log_filename = str(log_path)
+            self.log_data_count = 0
+            self.log_start_time = time.time()
+            
+            logger.info(f"Started CSV logging: {self.log_filename}")
+            return {"success": True, "message": "Logging started", "filename": self.log_filename}
+        
+        except Exception as e:
+            logger.error(f"Failed to start logging: {e}")
+            if self.log_file:
+                self.log_file.close()
+                self.log_file = None
+            return {"success": False, "message": str(e)}
+    
+    def stop_logging(self) -> Dict:
+        """Stop CSV logging"""
+        if not self.logging_enabled:
+            return {"success": False, "message": "Logging not active"}
+        
+        try:
+            self.logging_enabled = False
+            if self.log_file:
+                self.log_file.close()
+                self.log_file = None
+            
+            logger.info(f"Stopped CSV logging. Wrote {self.log_data_count} rows to {self.log_filename}")
+            filename = self.log_filename
+            rows = self.log_data_count
+            self.log_filename = None
+            self.log_writer = None
+            self.log_data_count = 0
+            
+            return {"success": True, "message": "Logging stopped", "rows": rows, "filename": filename}
+        
+        except Exception as e:
+            logger.error(f"Failed to stop logging: {e}")
+            return {"success": False, "message": str(e)}
+    
+    def get_logging_status(self) -> Dict:
+        """Get current logging status"""
+        return {
+            "active": self.logging_enabled,
+            "filename": self.log_filename if self.logging_enabled else None,
+            "rows": self.log_data_count if self.logging_enabled else 0,
+            "elapsed_sec": (time.time() - self.log_start_time) if self.log_start_time else 0
+        }
+    
+    def _write_log_entry(self, processed_data: Dict[str, Any]):
+        """Write current data to CSV log"""
+        if not self.logging_enabled or self.log_writer is None:
+            return
+        
+        with self.log_lock:
+            timestamp = datetime.now().isoformat()
+            elapsed_ms = int((time.time() - self.log_start_time) * 1000) if self.log_start_time else 0
+            
+            row = [timestamp, elapsed_ms]
+            
+            # Extract data from processed_data based on device type
+            if 'channels' in processed_data:
+                channels = processed_data['channels']
+                
+                # Determine device type from first channel
+                if channels and len(channels) > 0:
+                    first_ch = channels[0]
+                    
+                    if 'pressure_psi' in first_ch:
+                        # PT data (16 channels)
+                        for i in range(16):
+                            if i < len(channels):
+                                row.append(channels[i].get('pressure_psi', ''))
+                            else:
+                                row.append('')
+                    elif 'v_per_v' in first_ch:
+                        # LC data (4 channels)
+                        for i in range(4):
+                            if i < len(channels):
+                                row.append(channels[i].get('v_per_v', ''))
+                            else:
+                                row.append('')
+            
+            self.log_writer.writerow(row)
+            self.log_data_count += 1
+            
+            # Flush every 10 rows to ensure data is written
+            if self.log_data_count % 10 == 0:
+                self.log_file.flush()
     
     async def send_to_node(self, data: Dict[str, Any]) -> None:
         """Send JSON data to Node.js TCP port"""

@@ -406,6 +406,10 @@
                         valueElement.textContent = 'DISCONNECTED';
                         element.classList.add('error');
                         if (stateEl) stateEl.textContent = 'DISCONNECTED';
+                    } else if (sensor.status === 'unconfigured') {
+                        valueElement.textContent = 'UNCONFIGURED';
+                        element.classList.add('error');
+                        if (stateEl) stateEl.textContent = 'UNCONFIGURED';
                     } else {
                         valueElement.textContent = Number(sensor.pressure_psi).toFixed(2);
                         element.classList.remove('error');

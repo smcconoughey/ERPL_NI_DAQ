@@ -55,33 +55,9 @@ class PTCard(BaseDevice):
             self.sensor_config = {}
 
     def tare(self, baseline_raw_data: List[List[float]], ambient_psi: float = 14.7) -> None:
-        """Calculate a tare offset so all sensors read ambient_psi at rest."""
-        psi_values = []
-        included_channels = 0
-        excluded_channels = 0
-        for ch in range(min(self.channel_count, len(baseline_raw_data))):
-            data = baseline_raw_data[ch]
-            if not data:
-                continue
-            avg_current = sum(data) / len(data)
-            current_ma = avg_current * 1000
-            # Ignore clearly disconnected/out-of-range channels for tare computation
-            if current_ma < 3.0 or current_ma > 25.0:
-                excluded_channels += 1
-                continue
-            # convert without any existing tare offset
-            psi = self._convert_no_tare(current_ma, ch)
-            psi_values.append(psi)
-            included_channels += 1
-
-        if psi_values:
-            mean_psi = sum(psi_values) / len(psi_values)
-            self.tare_offset = mean_psi - ambient_psi
-            self.tared = True
-            logger.info(f"Tare used {included_channels} channels (excluded {excluded_channels}) -> offset {self.tare_offset:.3f} psi")
-        else:
-            logger.warning("Tare skipped: no valid channels in 3-25 mA range detected")
-            self.tared = False
+        """Tare disabled for gauge sensors; offset fixed at 0."""
+        self.tare_offset = 0.0
+        self.tared = False
 
     def _convert_no_tare(self, current_ma, channel):
         if channel in self.sensor_config:
@@ -95,7 +71,7 @@ class PTCard(BaseDevice):
             psi = (current_ma - zero_ma) * (max_psi / span_ma)
             return psi
         else:
-            return (current_ma - 4.0) * (10000.0 / 16.0)
+            raise ValueError(f"Unconfigured PT channel {channel}: missing calibration in interface_config.json")
     
     def configure_channels(self, task: nidaqmx.Task) -> None:
         channels = f"{self.device_name}/ai0:{self.channel_count-1}"
@@ -169,7 +145,11 @@ class PTCard(BaseDevice):
                     status = 'ok'
                     if current_ma < 3.0 or current_ma > 25.0:
                         status = 'disconnected'
-                    psi = self.convert_to_pressure(current_ma, channel_idx) if status == 'ok' else 0.0
+                    try:
+                        psi = self.convert_to_pressure(current_ma, channel_idx) if status == 'ok' else 0.0
+                    except Exception:
+                        status = 'unconfigured'
+                        psi = 0.0
                     sensor_info = self.get_sensor_info(channel_idx)
                     
                     processed_channels.append({

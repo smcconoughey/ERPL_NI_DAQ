@@ -2,15 +2,14 @@
 from typing import Dict, List, Type
 from .base_device import BaseDevice
 from .pt_card import PTCard
+from .lc_card import LCCard
 
 class DeviceRegistry:
     """Registry for managing different DAQ device types"""
     
     _devices: Dict[str, Type[BaseDevice]] = {
         "pt_card": PTCard,
-        # Add more device types here as needed
-        # "temperature_card": TemperatureCard,
-        # "strain_gauge_card": StrainGaugeCard,
+        "lc_card": LCCard,
     }
     
     @classmethod
