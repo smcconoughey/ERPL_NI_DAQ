@@ -136,6 +136,11 @@ class DAQWebSocketServer {
                         this.lastMessage = parsedData;
                         this.messageCount++;
                         
+                        // Log data if enabled
+                        if (this.loggingEnabled) {
+                            this.writeLogEntry(parsedData);
+                        }
+                        
                         this.broadcast({
                             type: 'data',
                             data: parsedData,
@@ -170,6 +175,134 @@ class DAQWebSocketServer {
                 clients: this.clients.size
             });
         }, HEARTBEAT_INTERVAL);
+    }
+    
+    startLogging() {
+        if (this.loggingEnabled) {
+            return { success: false, message: 'Logging already active', filename: this.logFilename };
+        }
+        
+        try {
+            const now = new Date();
+            const dateFolder = `${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`;
+            const timeStr = `${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`;
+            
+            const logDir = path.join(__dirname, 'logs', dateFolder);
+            if (!fs.existsSync(logDir)) {
+                fs.mkdirSync(logDir, { recursive: true });
+            }
+            
+            let logPath = path.join(logDir, `${timeStr}.csv`);
+            let counter = 1;
+            while (fs.existsSync(logPath)) {
+                logPath = path.join(logDir, `${timeStr}_${counter}.csv`);
+                counter++;
+            }
+            
+            this.logStream = createWriteStream(logPath);
+            this.logFilename = logPath;
+            this.logDataCount = 0;
+            this.logStartTime = Date.now();
+            this.loggingEnabled = true;
+            this.logHeader = null;
+            
+            console.log(`Started CSV logging: ${this.logFilename}`);
+            return { success: true, message: 'Logging started', filename: this.logFilename };
+        } catch (error) {
+            console.error('Failed to start logging:', error);
+            if (this.logStream) {
+                this.logStream.end();
+                this.logStream = null;
+            }
+            return { success: false, message: error.message };
+        }
+    }
+    
+    stopLogging() {
+        if (!this.loggingEnabled) {
+            return { success: false, message: 'Logging not active' };
+        }
+        
+        try {
+            this.loggingEnabled = false;
+            if (this.logStream) {
+                this.logStream.end();
+                this.logStream = null;
+            }
+            
+            console.log(`Stopped CSV logging. Wrote ${this.logDataCount} rows to ${this.logFilename}`);
+            const filename = this.logFilename;
+            const rows = this.logDataCount;
+            this.logFilename = null;
+            this.logDataCount = 0;
+            this.logHeader = null;
+            
+            return { success: true, message: 'Logging stopped', rows: rows, filename: filename };
+        } catch (error) {
+            console.error('Failed to stop logging:', error);
+            return { success: false, message: error.message };
+        }
+    }
+    
+    getLoggingStatus() {
+        return {
+            active: this.loggingEnabled,
+            filename: this.loggingEnabled ? this.logFilename : null,
+            rows: this.loggingEnabled ? this.logDataCount : 0,
+            elapsed_sec: this.loggingEnabled ? (Date.now() - this.logStartTime) / 1000 : 0
+        };
+    }
+    
+    writeLogEntry(data) {
+        if (!this.loggingEnabled || !this.logStream) {
+            return;
+        }
+        
+        try {
+            const timestamp = new Date().toISOString();
+            const elapsedMs = Date.now() - this.logStartTime;
+            
+            // Build CSV row
+            const row = [timestamp, elapsedMs];
+            
+            if (data.channels && Array.isArray(data.channels)) {
+                // Write header on first entry
+                if (!this.logHeader) {
+                    const header = ['timestamp', 'elapsed_ms'];
+                    
+                    // Determine device type from first channel
+                    const firstCh = data.channels[0];
+                    if (firstCh && 'pressure_psi' in firstCh) {
+                        // PT data
+                        for (let i = 0; i < 16; i++) {
+                            header.push(`PT${i}_psi`);
+                        }
+                    } else if (firstCh && 'v_per_v' in firstCh) {
+                        // LC data
+                        for (let i = 0; i < 4; i++) {
+                            header.push(`LC${i}_vv`);
+                        }
+                    }
+                    
+                    this.logHeader = header;
+                    this.logStream.write(header.join(',') + '\n');
+                }
+                
+                // Write data
+                data.channels.forEach((ch, idx) => {
+                    if ('pressure_psi' in ch) {
+                        row.push(ch.pressure_psi || '');
+                    } else if ('v_per_v' in ch) {
+                        row.push(ch.v_per_v || '');
+                    }
+                });
+            }
+            
+            this.logStream.write(row.join(',') + '\n');
+            this.logDataCount++;
+        } catch (error) {
+            console.error('Failed to write log entry:', error);
+        }
     }
     
     broadcast(message) {

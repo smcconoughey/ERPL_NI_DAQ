@@ -1,0 +1,718 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NI DAQ Telemetry Monitor</title>
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+            width: 100vw;
+            display: flex;
+            flex-direction: column;
+            background-color: #f8fafc;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background-color: #f5f5f5;
+            padding: 10px 20px;
+            border-bottom: 1px solid #ddd;
+            position: relative;
+            z-index: 1000;
+        }
+
+        .title {
+            font-size: 20px;
+            font-weight: bold;
+            color: #2b6cb0;
+        }
+
+        .connection-status {
+            font-size: 14px;
+            color: #4a5568;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .connection-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background-color: #cbd5e0;
+        }
+
+        .connection-indicator.connected {
+            background-color: #48bb78;
+            animation: pulse 2s infinite;
+        }
+
+        .connection-indicator.disconnected {
+            background-color: #f56565;
+        }
+
+        .main-container {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+            padding: 20px;
+            gap: 20px;
+        }
+
+        .telemetry-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            overflow-y: auto;
+        }
+
+        .telemetry-section {
+            background-color: #fff;
+            border-radius: 12px;
+            padding: 16px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        .section-pt {
+            border-left: 4px solid #3182ce;
+        }
+
+        .section-lc {
+            border-left: 4px solid #805ad5;
+        }
+
+        .telemetry-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+            padding-bottom: 8px;
+            border-bottom: 2px solid #e2e8f0;
+        }
+
+        .telemetry-title {
+            font-size: 16px;
+            font-weight: bold;
+            color: #2d3748;
+        }
+
+        .telemetry-count {
+            font-size: 12px;
+            color: #718096;
+        }
+
+        .refresh-btn {
+            background-color: transparent;
+            border: none;
+            color: #3182ce;
+            cursor: pointer;
+            font-size: 14px;
+            padding: 4px 8px;
+            border-radius: 4px;
+            transition: background-color 0.2s;
+        }
+
+        .refresh-btn:hover {
+            background-color: rgba(49, 130, 206, 0.1);
+        }
+
+        .telemetry-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 12px;
+        }
+
+        .telemetry-item {
+            background-color: #f7fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 12px;
+            transition: all 0.2s;
+        }
+
+        .telemetry-item:hover {
+            border-color: #cbd5e0;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+        }
+
+        .telemetry-item.disconnected {
+            background-color: #fff5f5;
+            border-color: #fc8181;
+        }
+
+        .telemetry-item.unconfigured {
+            background-color: #fffaf0;
+            border-color: #f6ad55;
+        }
+
+        .telemetry-label {
+            font-size: 11px;
+            color: #718096;
+            margin-bottom: 4px;
+            font-weight: 500;
+        }
+
+        .telemetry-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #2d3748;
+            margin-bottom: 2px;
+        }
+
+        .telemetry-item.disconnected .telemetry-value {
+            color: #e53e3e;
+            font-size: 14px;
+        }
+
+        .telemetry-item.unconfigured .telemetry-value {
+            color: #dd6b20;
+            font-size: 14px;
+        }
+
+        .telemetry-units {
+            font-size: 12px;
+            color: #a0aec0;
+        }
+
+        .logging-controls {
+            background-color: #fff;
+            border-radius: 12px;
+            padding: 16px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        .logging-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .logging-title {
+            font-size: 16px;
+            font-weight: bold;
+            color: #2d3748;
+        }
+
+        .logging-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background-color: #cbd5e0;
+        }
+
+        .logging-indicator.active {
+            background-color: #48bb78;
+            animation: pulse 2s infinite;
+        }
+
+        .logging-filename {
+            font-size: 11px;
+            color: #718096;
+            margin-bottom: 12px;
+            text-align: center;
+            font-family: monospace;
+            word-break: break-all;
+        }
+
+        .logging-buttons {
+            display: flex;
+            gap: 8px;
+        }
+
+        .log-btn {
+            flex: 1;
+            padding: 10px;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .log-btn.start {
+            background-color: #48bb78;
+            color: white;
+        }
+
+        .log-btn.start:hover {
+            background-color: #38a169;
+        }
+
+        .log-btn.stop {
+            background-color: #f56565;
+            color: white;
+        }
+
+        .log-btn.stop:hover {
+            background-color: #e53e3e;
+        }
+
+        .log-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .data-timestamp {
+            font-size: 10px;
+            color: #718096;
+            text-align: center;
+            margin-top: 12px;
+        }
+
+        .status-bar {
+            background-color: #2d3748;
+            color: #e2e8f0;
+            padding: 8px 20px;
+            font-size: 12px;
+            font-family: monospace;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.6; }
+            100% { opacity: 1; }
+        }
+
+        .stats-panel {
+            background-color: #fff;
+            border-radius: 12px;
+            padding: 16px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+        }
+
+        .stat-item {
+            text-align: center;
+            padding: 8px;
+            background-color: #f7fafc;
+            border-radius: 6px;
+        }
+
+        .stat-label {
+            font-size: 10px;
+            color: #718096;
+            margin-bottom: 4px;
+        }
+
+        .stat-value {
+            font-size: 18px;
+            font-weight: bold;
+            color: #2d3748;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="header">
+        <div class="title">NI DAQ Telemetry Monitor</div>
+        <div class="connection-status">
+            <div class="connection-indicator" id="connection-indicator"></div>
+            <span id="connection-text">Connecting...</span>
+        </div>
+    </div>
+
+    <div class="main-container">
+        <div class="telemetry-panel">
+            <!-- Pressure Transducers Section -->
+            <div class="telemetry-section section-pt">
+                <div class="telemetry-header">
+                    <span class="telemetry-title"><i class="fas fa-gauge-high"></i> Pressure Transducers</span>
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <button class="refresh-btn" onclick="refreshTelemetry()">
+                            <i class="fas fa-sync-alt"></i>
+                        </button>
+                        <span class="telemetry-count" id="pt-count">16 channels</span>
+                    </div>
+                </div>
+                <div class="telemetry-grid" id="pt-readings">
+                    <!-- PT readings will be populated here -->
+                </div>
+            </div>
+
+            <!-- Load Cells Section -->
+            <div class="telemetry-section section-lc">
+                <div class="telemetry-header">
+                    <span class="telemetry-title"><i class="fas fa-scale-balanced"></i> Load Cells</span>
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <button class="refresh-btn" onclick="refreshTelemetry()">
+                            <i class="fas fa-sync-alt"></i>
+                        </button>
+                        <span class="telemetry-count" id="lc-count">4 channels</span>
+                    </div>
+                </div>
+                <div class="telemetry-grid" id="lc-readings">
+                    <!-- LC readings will be populated here -->
+                </div>
+            </div>
+
+            <!-- Logging Controls -->
+            <div class="logging-controls">
+                <div class="logging-header">
+                    <span class="logging-title"><i class="fas fa-file-csv"></i> Data Logging</span>
+                    <div class="logging-indicator" id="logging-indicator"></div>
+                </div>
+                <div class="logging-filename" id="logging-filename">No active log file</div>
+                <div class="logging-buttons">
+                    <button class="log-btn start" id="start-log-btn" onclick="startLogging()">
+                        <i class="fas fa-play"></i> Start Logging
+                    </button>
+                    <button class="log-btn stop" id="stop-log-btn" onclick="stopLogging()" disabled>
+                        <i class="fas fa-stop"></i> Stop Logging
+                    </button>
+                </div>
+            </div>
+
+            <!-- Stats Panel -->
+            <div class="stats-panel">
+                <div class="telemetry-header">
+                    <span class="telemetry-title"><i class="fas fa-chart-line"></i> System Stats</span>
+                </div>
+                <div class="stats-grid">
+                    <div class="stat-item">
+                        <div class="stat-label">Update Rate</div>
+                        <div class="stat-value" id="update-rate">-- Hz</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">Messages</div>
+                        <div class="stat-value" id="message-count">0</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">Connected</div>
+                        <div class="stat-value" id="connected-channels">0</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">Uptime</div>
+                        <div class="stat-value" id="uptime">00:00</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="data-timestamp" id="data-timestamp">
+                Last Update: --:--:--
+            </div>
+        </div>
+    </div>
+
+    <div class="status-bar">
+        <span id="status-text">Initializing...</span>
+        <span id="status-info"></span>
+    </div>
+
+    <script>
+        let ws = null;
+        let isWsConnected = false;
+        let messageCount = 0;
+        let lastUpdateTime = null;
+        let updateTimes = [];
+        let startTime = Date.now();
+        let ptChannels = [];
+        let lcChannels = [];
+
+        // Initialize telemetry placeholders
+        function initTelemetry() {
+            const ptGrid = document.getElementById('pt-readings');
+            const lcGrid = document.getElementById('lc-readings');
+
+            // Create PT placeholders (16 channels)
+            for (let i = 0; i < 16; i++) {
+                const item = createTelemetryItem('PT', i, 'PSI');
+                ptGrid.appendChild(item);
+            }
+
+            // Create LC placeholders (4 channels)
+            for (let i = 0; i < 4; i++) {
+                const item = createTelemetryItem('LC', i, 'V/V');
+                lcGrid.appendChild(item);
+            }
+        }
+
+        function createTelemetryItem(type, channel, units) {
+            const div = document.createElement('div');
+            div.className = 'telemetry-item';
+            div.id = `${type.toLowerCase()}-${channel}`;
+            div.innerHTML = `
+                <div class="telemetry-label">${type}${channel}</div>
+                <div class="telemetry-value">--</div>
+                <div class="telemetry-units">${units}</div>
+            `;
+            return div;
+        }
+
+        function updatePTData(channels) {
+            if (!channels || !Array.isArray(channels)) return;
+
+            channels.forEach((ch, idx) => {
+                const element = document.getElementById(`pt-${idx}`);
+                if (!element) return;
+
+                const valueEl = element.querySelector('.telemetry-value');
+                
+                element.classList.remove('disconnected', 'unconfigured');
+
+                if (ch.status === 'disconnected') {
+                    valueEl.textContent = 'DISCONNECTED';
+                    element.classList.add('disconnected');
+                } else if (ch.status === 'unconfigured') {
+                    valueEl.textContent = 'UNCONFIGURED';
+                    element.classList.add('unconfigured');
+                } else {
+                    const psi = ch.pressure_psi !== undefined ? ch.pressure_psi : 0;
+                    valueEl.textContent = psi.toFixed(2);
+                }
+            });
+
+            // Update count of connected channels
+            const connected = channels.filter(ch => ch.status !== 'disconnected' && ch.status !== 'unconfigured').length;
+            document.getElementById('connected-channels').textContent = connected;
+        }
+
+        function updateLCData(channels) {
+            if (!channels || !Array.isArray(channels)) return;
+
+            channels.forEach((ch, idx) => {
+                const element = document.getElementById(`lc-${idx}`);
+                if (!element) return;
+
+                const valueEl = element.querySelector('.telemetry-value');
+                
+                const vv = ch.v_per_v !== undefined ? ch.v_per_v : 0;
+                valueEl.textContent = vv.toFixed(6);
+            });
+        }
+
+        function updateTimestamp() {
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString();
+            document.getElementById('data-timestamp').textContent = `Last Update: ${timeStr}`;
+        }
+
+        function updateUpdateRate() {
+            const now = Date.now();
+            updateTimes.push(now);
+            
+            // Keep only last 10 seconds of updates
+            updateTimes = updateTimes.filter(t => now - t < 10000);
+            
+            if (updateTimes.length > 1) {
+                const rate = updateTimes.length / 10;
+                document.getElementById('update-rate').textContent = rate.toFixed(1) + ' Hz';
+            }
+        }
+
+        function updateUptime() {
+            const elapsed = Date.now() - startTime;
+            const seconds = Math.floor(elapsed / 1000) % 60;
+            const minutes = Math.floor(elapsed / 60000) % 60;
+            const hours = Math.floor(elapsed / 3600000);
+            
+            const timeStr = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+            document.getElementById('uptime').textContent = timeStr;
+        }
+
+        function initWebSocket() {
+            try {
+                const host = window.location.hostname || 'localhost';
+                const port = 3000;
+                ws = new WebSocket(`ws://${host}:${port}`);
+            } catch (e) {
+                console.error('WebSocket init failed:', e);
+                updateConnectionStatus(false);
+                setTimeout(initWebSocket, 2000);
+                return;
+            }
+
+            ws.onopen = () => {
+                isWsConnected = true;
+                updateConnectionStatus(true);
+                updateStatusBar('Connected to DAQ server');
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    
+                    if (msg.type === 'data' && msg.data) {
+                        messageCount++;
+                        document.getElementById('message-count').textContent = messageCount;
+                        
+                        // Determine device type and update appropriate section
+                        if (msg.data.channels && msg.data.channels.length > 0) {
+                            const firstCh = msg.data.channels[0];
+                            
+                            if ('pressure_psi' in firstCh) {
+                                updatePTData(msg.data.channels);
+                            } else if ('v_per_v' in firstCh) {
+                                updateLCData(msg.data.channels);
+                            }
+                        }
+                        
+                        updateTimestamp();
+                        updateUpdateRate();
+                    } else if (msg.type === 'welcome') {
+                        updateStatusBar(msg.message);
+                    } else if (msg.success !== undefined && msg.message && msg.message.includes('Logging')) {
+                        if (msg.success) {
+                            Swal.fire({
+                                title: 'Success',
+                                text: msg.message,
+                                icon: 'success',
+                                timer: 2000,
+                                showConfirmButton: false
+                            });
+                        }
+                        pollLoggingStatus();
+                    } else if (msg.active !== undefined) {
+                        updateLoggingStatus(msg);
+                    }
+                } catch (error) {
+                    console.error('Error parsing WebSocket message:', error);
+                }
+            };
+
+            ws.onerror = (error) => {
+                isWsConnected = false;
+                updateConnectionStatus(false);
+                console.error('WebSocket error:', error);
+            };
+
+            ws.onclose = () => {
+                isWsConnected = false;
+                updateConnectionStatus(false);
+                updateStatusBar('Disconnected. Reconnecting...');
+                setTimeout(initWebSocket, 2000);
+            };
+        }
+
+        function updateConnectionStatus(connected) {
+            const indicator = document.getElementById('connection-indicator');
+            const text = document.getElementById('connection-text');
+            
+            if (connected) {
+                indicator.classList.add('connected');
+                indicator.classList.remove('disconnected');
+                text.textContent = 'Connected';
+            } else {
+                indicator.classList.remove('connected');
+                indicator.classList.add('disconnected');
+                text.textContent = 'Disconnected';
+            }
+        }
+
+        function updateStatusBar(message, info = '') {
+            document.getElementById('status-text').textContent = message;
+            document.getElementById('status-info').textContent = info;
+        }
+
+        function refreshTelemetry() {
+            updateStatusBar('Refreshing telemetry...');
+            // The data will refresh automatically from the stream
+            setTimeout(() => updateStatusBar('Ready'), 1000);
+        }
+
+        // Logging functions
+        function startLogging() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                Swal.fire({
+                    title: 'Connection Error',
+                    text: 'WebSocket not connected',
+                    icon: 'error'
+                });
+                return;
+            }
+
+            try {
+                ws.send(JSON.stringify({ action: 'start_logging' }));
+            } catch (error) {
+                console.error('Failed to start logging:', error);
+                Swal.fire({
+                    title: 'Error',
+                    text: 'Failed to start logging',
+                    icon: 'error'
+                });
+            }
+        }
+
+        function stopLogging() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                return;
+            }
+
+            try {
+                ws.send(JSON.stringify({ action: 'stop_logging' }));
+            } catch (error) {
+                console.error('Failed to stop logging:', error);
+            }
+        }
+
+        function updateLoggingStatus(status) {
+            const indicator = document.getElementById('logging-indicator');
+            const filenameEl = document.getElementById('logging-filename');
+            const startBtn = document.getElementById('start-log-btn');
+            const stopBtn = document.getElementById('stop-log-btn');
+
+            if (status.active) {
+                indicator.classList.add('active');
+                const filename = status.filename || 'logging.csv';
+                const shortName = filename.split(/[/\\]/).pop();
+                filenameEl.textContent = `Logging to: ${shortName}`;
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+            } else {
+                indicator.classList.remove('active');
+                filenameEl.textContent = 'No active log file';
+                startBtn.disabled = false;
+                stopBtn.disabled = true;
+            }
+        }
+
+        function pollLoggingStatus() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                try {
+                    ws.send(JSON.stringify({ action: 'get_logging_status' }));
+                } catch (error) {
+                    console.error('Failed to poll logging status:', error);
+                }
+            }
+        }
+
+        // Initialize on load
+        document.addEventListener('DOMContentLoaded', () => {
+            initTelemetry();
+            initWebSocket();
+            updateStatusBar('Connecting to server...');
+            
+            // Poll logging status every 2 seconds
+            setInterval(pollLoggingStatus, 2000);
+            
+            // Update uptime every second
+            setInterval(updateUptime, 1000);
+        });
+    </script>
+</body>
+
+</html>
+
