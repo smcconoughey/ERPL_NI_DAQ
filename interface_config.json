@@ -13,20 +13,20 @@
   "sensors": [
     {
       "channel": 0,
-      "name": "LOX Reg Upstream",
+      "name": "Tank Upstream",
       "id": "PT1E",
       "serial": "1A02FJW7H2V",
       "group": "lox",
       
       "calibration": {
-        "max_psi": 10000.0,
+        "max_psi": 1500.0,
         "zero_ma": 4.0,
         "units": "psi"
       }
     },
     {
       "channel": 1,
-      "name": "LOX Reg Downstream",
+      "name": "Tank Downstream",
       "id": "PT2E",
       "serial": "2A02FJW7H2V",
       "group": "lox",
@@ -38,12 +38,12 @@
     },
     {
       "channel": 2,
-      "name": "LOX Tank Upstream",
+      "name": "Manifold",
       "id": "PT3E",
       "serial": "3A02FJW7H2V",
       "group": "lox",
       "calibration": {
-        "max_psi": 10000.0,
+        "max_psi": 1500.0,
         "zero_ma": 4.0,
         "units": "psi"
       }
@@ -55,7 +55,7 @@
       "serial": "4A02FJW7H2V",
       "group": "lox",
       "calibration": {
-        "max_psi": 10000.0,
+        "max_psi": 1500.0,
         "zero_ma": 4.0,
         "units": "psi"
       }
@@ -67,7 +67,7 @@
       "serial": "5A02FJW7H2V",
       "group": "lox",
       "calibration": {
-        "max_psi": 10000.0,
+        "max_psi": 1500.0,
         "zero_ma": 4.0,
         "units": "psi"
       }

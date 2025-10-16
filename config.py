@@ -12,8 +12,13 @@ DEBUG_SAMPLE_EVERY_N = 50      # How often to log raw samples (reads)
 
 # Device configuration
 DEVICE_CHASSIS = "cDAQ9189-2462EFD"  # Actual device name from NI MAX
-ACTIVE_DEVICES = ["pt_card"]  # List of active device modules
-MODULE_SLOT = 1  # Physical slot number for the active module(s)
+# Enable both PT and LC cards so both stream in the UI
+ACTIVE_DEVICES = ["pt_card", "lc_card"]  # List of active device modules
+
+# Per-device slot overrides (fallback if autodetect fails)
+PT_MODULE_SLOT = 2
+LC_MODULE_SLOT = 1
+MODULE_SLOT = 1  # legacy fallback
 
 # PT Calibration Configuration - now loaded from interface_config.json
 # This is kept for backward compatibility but can be overridden by the JSON config

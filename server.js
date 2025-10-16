@@ -24,7 +24,9 @@ class DAQWebSocketServer {
         });
         
         this.clients = new Set();
-        this.lastMessage = null;
+        this.lastMessage = null;           // last full merged frame
+        this.lastPT = null;                // last PT-only frame
+        this.lastLC = null;                // last LC-only frame
         this.messageCount = 0;
         
         // CSV logging
@@ -34,6 +36,7 @@ class DAQWebSocketServer {
         this.logDataCount = 0;
         this.logStartTime = null;
         this.logHeader = null;
+        this.headerBuilt = false;
         
         this.setupExpress();
         this.setupWebSocket();
@@ -93,13 +96,26 @@ class DAQWebSocketServer {
                     const msg = JSON.parse(message.toString());
                     
                     if (msg.action === 'start_logging') {
-                        const result = this.startLogging();
-                        ws.send(JSON.stringify(result));
+                        try {
+                            const p = path.join(__dirname, 'start_logging.cmd');
+                            fs.writeFileSync(p, 'start');
+                            ws.send(JSON.stringify({ success: true, message: 'Requested Python to start logging' }));
+                        } catch (e) {
+                            ws.send(JSON.stringify({ success: false, message: e.message }));
+                        }
                     } else if (msg.action === 'stop_logging') {
-                        const result = this.stopLogging();
-                        ws.send(JSON.stringify(result));
+                        try {
+                            const p = path.join(__dirname, 'stop_logging.cmd');
+                            fs.writeFileSync(p, 'stop');
+                            ws.send(JSON.stringify({ success: true, message: 'Requested Python to stop logging' }));
+                        } catch (e) {
+                            ws.send(JSON.stringify({ success: false, message: e.message }));
+                        }
                     } else if (msg.action === 'get_logging_status') {
-                        const result = this.getLoggingStatus();
+                        const status = this.getLoggingStatusFromFile();
+                        ws.send(JSON.stringify(status));
+                    } else if (msg.action === 'tare_lc') {
+                        const result = this.tareLCs();
                         ws.send(JSON.stringify(result));
                     } else {
                         console.log('Received message from client:', message.toString());
@@ -133,19 +149,47 @@ class DAQWebSocketServer {
                     
                     messages.forEach(msg => {
                         const parsedData = JSON.parse(msg);
-                        this.lastMessage = parsedData;
-                        this.messageCount++;
-                        
-                        // Log data if enabled
-                        if (this.loggingEnabled) {
-                            this.writeLogEntry(parsedData);
+
+                        const src = (parsedData && parsedData.source) ? String(parsedData.source) : '';
+
+                        if (/Merged/i.test(src)) {
+                            // Accept fully merged frame from Python directly
+                            this.lastMessage = parsedData;
+                            this.messageCount++;
+                            this.broadcast({
+                                type: 'data',
+                                data: parsedData,
+                                timestamp: new Date().toISOString(),
+                                raw: parsedData && parsedData.raw ? parsedData.raw : undefined
+                            });
+                        } else {
+                            // Merge PT and LC frames so UI gets unified payload
+                            if (parsedData && parsedData.channels && parsedData.channels.length) {
+                                if (/PT Card|Pressure/i.test(src)) {
+                                    this.lastPT = parsedData;
+                                } else if (/LC Card|Load/i.test(src)) {
+                                    this.lastLC = parsedData;
+                                }
+                            }
+
+                            // Build merged frame
+                            let merged = { timestamp: new Date().toISOString(), channels: [] };
+                            if (this.lastPT && Array.isArray(this.lastPT.channels)) {
+                                merged.channels = merged.channels.concat(this.lastPT.channels);
+                            }
+                            if (this.lastLC && Array.isArray(this.lastLC.channels)) {
+                                merged.channels = merged.channels.concat(this.lastLC.channels);
+                            }
+                            this.lastMessage = merged;
+                            this.messageCount++;
+
+                            this.broadcast({
+                                type: 'data',
+                                data: merged,
+                                timestamp: new Date().toISOString(),
+                                raw: parsedData && parsedData.raw ? parsedData.raw : undefined
+                            });
                         }
-                        
-                        this.broadcast({
-                            type: 'data',
-                            data: parsedData,
-                            timestamp: new Date().toISOString()
-                        });
                     });
                     
                 } catch (error) {
@@ -177,131 +221,44 @@ class DAQWebSocketServer {
         }, HEARTBEAT_INTERVAL);
     }
     
-    startLogging() {
-        if (this.loggingEnabled) {
-            return { success: false, message: 'Logging already active', filename: this.logFilename };
-        }
-        
+    startLogging() { return { success: false, message: 'CSV logging handled by Python streamer' }; }
+    
+    stopLogging() { return { success: false, message: 'CSV logging handled by Python streamer' }; }
+    
+    getLoggingStatus() { return { active: false, filename: null, rows: 0, elapsed_sec: 0, message: 'CSV logging handled by Python streamer' }; }
+    
+    // Override getLoggingStatus to read Python's status file if present
+    getLoggingStatusFromFile() {
         try {
-            const now = new Date();
-            const dateFolder = `${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`;
-            const timeStr = `${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`;
-            
-            const logDir = path.join(__dirname, 'logs', dateFolder);
-            if (!fs.existsSync(logDir)) {
-                fs.mkdirSync(logDir, { recursive: true });
+            const statusPath = path.join(__dirname, 'logging_status.json');
+            if (fs.existsSync(statusPath)) {
+                const raw = fs.readFileSync(statusPath, 'utf-8');
+                const data = JSON.parse(raw);
+                return {
+                    active: !!data.active,
+                    filename: data.filename || null,
+                    rows: data.rows || 0,
+                    elapsed_sec: data.elapsed_sec || 0
+                };
             }
-            
-            let logPath = path.join(logDir, `${timeStr}.csv`);
-            let counter = 1;
-            while (fs.existsSync(logPath)) {
-                logPath = path.join(logDir, `${timeStr}_${counter}.csv`);
-                counter++;
-            }
-            
-            this.logStream = createWriteStream(logPath);
-            this.logFilename = logPath;
-            this.logDataCount = 0;
-            this.logStartTime = Date.now();
-            this.loggingEnabled = true;
-            this.logHeader = null;
-            
-            console.log(`Started CSV logging: ${this.logFilename}`);
-            return { success: true, message: 'Logging started', filename: this.logFilename };
+        } catch (e) {
+            console.error('Failed to read logging status:', e);
+        }
+        return { active: false, filename: null, rows: 0, elapsed_sec: 0 };
+    }
+    
+    writeLogEntry() { /* disabled; logging in Python */ }
+    
+    tareLCs() {
+        try {
+            // Create tare command file for Python streamer to detect
+            const tareCmdPath = path.join(__dirname, 'tare.cmd');
+            fs.writeFileSync(tareCmdPath, 'tare');
+            console.log('Tare command sent to DAQ streamer');
+            return { success: true, message: 'Tare command sent. Load cells will be tared on next data read.' };
         } catch (error) {
-            console.error('Failed to start logging:', error);
-            if (this.logStream) {
-                this.logStream.end();
-                this.logStream = null;
-            }
+            console.error('Failed to send tare command:', error);
             return { success: false, message: error.message };
-        }
-    }
-    
-    stopLogging() {
-        if (!this.loggingEnabled) {
-            return { success: false, message: 'Logging not active' };
-        }
-        
-        try {
-            this.loggingEnabled = false;
-            if (this.logStream) {
-                this.logStream.end();
-                this.logStream = null;
-            }
-            
-            console.log(`Stopped CSV logging. Wrote ${this.logDataCount} rows to ${this.logFilename}`);
-            const filename = this.logFilename;
-            const rows = this.logDataCount;
-            this.logFilename = null;
-            this.logDataCount = 0;
-            this.logHeader = null;
-            
-            return { success: true, message: 'Logging stopped', rows: rows, filename: filename };
-        } catch (error) {
-            console.error('Failed to stop logging:', error);
-            return { success: false, message: error.message };
-        }
-    }
-    
-    getLoggingStatus() {
-        return {
-            active: this.loggingEnabled,
-            filename: this.loggingEnabled ? this.logFilename : null,
-            rows: this.loggingEnabled ? this.logDataCount : 0,
-            elapsed_sec: this.loggingEnabled ? (Date.now() - this.logStartTime) / 1000 : 0
-        };
-    }
-    
-    writeLogEntry(data) {
-        if (!this.loggingEnabled || !this.logStream) {
-            return;
-        }
-        
-        try {
-            const timestamp = new Date().toISOString();
-            const elapsedMs = Date.now() - this.logStartTime;
-            
-            // Build CSV row
-            const row = [timestamp, elapsedMs];
-            
-            if (data.channels && Array.isArray(data.channels)) {
-                // Write header on first entry
-                if (!this.logHeader) {
-                    const header = ['timestamp', 'elapsed_ms'];
-                    
-                    // Determine device type from first channel
-                    const firstCh = data.channels[0];
-                    if (firstCh && 'pressure_psi' in firstCh) {
-                        // PT data
-                        for (let i = 0; i < 16; i++) {
-                            header.push(`PT${i}_psi`);
-                        }
-                    } else if (firstCh && 'v_per_v' in firstCh) {
-                        // LC data
-                        for (let i = 0; i < 4; i++) {
-                            header.push(`LC${i}_vv`);
-                        }
-                    }
-                    
-                    this.logHeader = header;
-                    this.logStream.write(header.join(',') + '\n');
-                }
-                
-                // Write data
-                data.channels.forEach((ch, idx) => {
-                    if ('pressure_psi' in ch) {
-                        row.push(ch.pressure_psi || '');
-                    } else if ('v_per_v' in ch) {
-                        row.push(ch.v_per_v || '');
-                    }
-                });
-            }
-            
-            this.logStream.write(row.join(',') + '\n');
-            this.logDataCount++;
-        } catch (error) {
-            console.error('Failed to write log entry:', error);
         }
     }
     

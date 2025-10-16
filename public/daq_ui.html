@@ -313,10 +313,6 @@
 
 <body>
     <div class="header">
-        <div class="abort-controls">
-            <button class="abort" id="abort_button">ABORT</button>
-        </div>
-        
         <div class="center-controls">
             <button class="new-log-btn" onclick="createNewLogFile()">
                 <i class="fas fa-file-circle-plus"></i> Create New Log File
@@ -325,10 +321,6 @@
                 <div class="log-indicator active" id="log-indicator"></div>
                 <span id="log-filename">Logging to: --</span>
             </div>
-        </div>
-        
-        <div class="safety-controls">
-            <button class="emergency-stop" id="emergency_stop">EMERGENCY STOP</button>
         </div>
     </div>
 
@@ -373,6 +365,9 @@
                         LOAD CELLS
                         <span class="telemetry-count" id="lc-count">4 channels</span>
                     </div>
+                    <button class="new-log-btn" onclick="tareLCs()" style="font-size: 12px; padding: 6px 12px;">
+                        <i class="fas fa-balance-scale"></i> Tare Load Cells
+                    </button>
                 </div>
                 <div class="telemetry-grid" id="lc-readings"></div>
             </div>
@@ -392,8 +387,9 @@
         let updateTimes = [];
         let startTime = Date.now();
         let autoStartedLogging = false;
+        let sensorConfig = null;
 
-        function initTelemetry() {
+        async function initTelemetry() {
             const ptGrid = document.getElementById('pt-readings');
             const lcGrid = document.getElementById('lc-readings');
 
@@ -405,8 +401,17 @@
 
             // Create LC placeholders (4 channels)
             for (let i = 0; i < 4; i++) {
-                const item = createTelemetryItem('LC', i, 'V/V');
+                const item = createTelemetryItem('LC', i, 'lbf');
                 lcGrid.appendChild(item);
+            }
+
+            // Load PT names/ratings from interface_config.json
+            try {
+                const res = await fetch('/api/config');
+                sensorConfig = await res.json();
+                applyPTConfigToUI();
+            } catch (e) {
+                console.warn('Failed to load /api/config', e);
             }
         }
 
@@ -418,8 +423,24 @@
                 <div class="telemetry-label">${type}${channel}</div>
                 <div class="telemetry-value">--</div>
                 <div class="telemetry-units">${units}</div>
+                <div class="telemetry-details"></div>
             `;
             return div;
+        }
+
+        function applyPTConfigToUI() {
+            if (!sensorConfig || !Array.isArray(sensorConfig.sensors)) return;
+            sensorConfig.sensors.forEach((sensor) => {
+                if (typeof sensor.channel !== 'number') return;
+                const el = document.getElementById(`pt-${sensor.channel}`);
+                if (!el) return;
+                const labelEl = el.querySelector('.telemetry-label');
+                const detailsEl = el.querySelector('.telemetry-details');
+                if (sensor.name) labelEl.textContent = sensor.name;
+                const cal = sensor.calibration || {};
+                const maxPsi = cal.max_psi || cal.maxPSI;
+                if (maxPsi && detailsEl) detailsEl.textContent = `Rating: 0–${maxPsi} PSI`;
+            });
         }
 
         function updatePTData(channels) {
@@ -430,6 +451,7 @@
                 if (!element) return;
 
                 const valueEl = element.querySelector('.telemetry-value');
+                const details = ensureDetails(element);
                 
                 element.classList.remove('disconnected', 'unconfigured');
 
@@ -443,6 +465,11 @@
                     const psi = ch.pressure_psi !== undefined ? ch.pressure_psi : 0;
                     valueEl.textContent = psi.toFixed(2);
                 }
+
+                // Raw current if provided
+                if (ch.current_ma !== undefined) {
+                    details.textContent = `${ch.current_ma.toFixed(2)} mA`;
+                }
             });
         }
 
@@ -453,11 +480,34 @@
                 const element = document.getElementById(`lc-${idx}`);
                 if (!element) return;
 
+                const labelEl = element.querySelector('.telemetry-label');
                 const valueEl = element.querySelector('.telemetry-value');
+                const details = ensureDetails(element);
                 
-                const vv = ch.v_per_v !== undefined ? ch.v_per_v : 0;
-                valueEl.textContent = vv.toFixed(6);
+                // Update label with name from config
+                if (ch.name) {
+                    labelEl.textContent = ch.name;
+                }
+                
+                // Display lbf value
+                const lbf = ch.lbf !== undefined ? ch.lbf : 0;
+                valueEl.textContent = lbf.toFixed(3);
+
+                // Raw V/V if provided
+                if (ch.v_per_v !== undefined) {
+                    details.textContent = `${ch.v_per_v.toFixed(6)} V/V`;
+                }
             });
+        }
+
+        function ensureDetails(el) {
+            let d = el.querySelector('.telemetry-details');
+            if (!d) {
+                d = document.createElement('div');
+                d.className = 'telemetry-details';
+                el.appendChild(d);
+            }
+            return d;
         }
 
         function updateTimestamp() {
@@ -491,7 +541,12 @@
                 Swal.fire({
                     title: 'Connection Error',
                     text: 'WebSocket not connected',
-                    icon: 'error'
+                    icon: 'error',
+                    toast: true,
+                    position: 'top-end',
+                    timer: 2500,
+                    showConfirmButton: false,
+                    backdrop: false
                 });
                 return;
             }
@@ -542,6 +597,50 @@
             }
         }
 
+        function tareLCs() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                Swal.fire({
+                    title: 'Connection Error',
+                    text: 'WebSocket not connected',
+                    icon: 'error',
+                    toast: true,
+                    position: 'top-end',
+                    timer: 2500,
+                    showConfirmButton: false,
+                    backdrop: false
+                });
+                return;
+            }
+
+            Swal.fire({
+                title: 'Tare Load Cells?',
+                text: 'This will zero all load cell readings at their current values',
+                icon: 'question',
+                showCancelButton: true,
+                confirmButtonColor: '#3182ce',
+                cancelButtonColor: '#a0aec0',
+                confirmButtonText: 'Tare Now'
+            }).then((result) => {
+                if (result.isConfirmed) {
+                    try {
+                        ws.send(JSON.stringify({ action: 'tare_lc' }));
+                    } catch (error) {
+                        console.error('Failed to send tare command:', error);
+                        Swal.fire({
+                            title: 'Error',
+                            text: 'Failed to send tare command',
+                            icon: 'error',
+                            toast: true,
+                            position: 'top-end',
+                            timer: 2500,
+                            showConfirmButton: false,
+                            backdrop: false
+                        });
+                    }
+                }
+            });
+        }
+
         function initWebSocket() {
             try {
                 const host = window.location.hostname || 'localhost';
@@ -572,13 +671,10 @@
                         document.getElementById('message-count').textContent = `${messageCount} messages`;
                         
                         if (msg.data.channels && msg.data.channels.length > 0) {
-                            const firstCh = msg.data.channels[0];
-                            
-                            if ('pressure_psi' in firstCh) {
-                                updatePTData(msg.data.channels);
-                            } else if ('v_per_v' in firstCh) {
-                                updateLCData(msg.data.channels);
-                            }
+                            const pt = msg.data.channels.filter(ch => 'pressure_psi' in ch);
+                            const lc = msg.data.channels.filter(ch => ('lbf' in ch) || ('v_per_v' in ch));
+                            if (pt.length) updatePTData(pt);
+                            if (lc.length) updateLCData(lc);
                         }
                         
                         updateTimestamp();
@@ -593,10 +689,37 @@
                                 text: msg.message,
                                 icon: icon,
                                 timer: 2000,
-                                showConfirmButton: false
+                                showConfirmButton: false,
+                                toast: true,
+                                position: 'top-end',
+                                backdrop: false
                             });
                         }
                         pollLoggingStatus();
+                    } else if (msg.success !== undefined && msg.message && msg.message.includes('Tare')) {
+                        if (msg.success) {
+                            Swal.fire({
+                                title: 'Tare Command Sent',
+                                text: msg.message,
+                                icon: 'success',
+                                timer: 3000,
+                                showConfirmButton: false,
+                                toast: true,
+                                position: 'top-end',
+                                backdrop: false
+                            });
+                        } else {
+                            Swal.fire({
+                                title: 'Tare Failed',
+                                text: msg.message,
+                                icon: 'error',
+                                toast: true,
+                                position: 'top-end',
+                                timer: 2500,
+                                showConfirmButton: false,
+                                backdrop: false
+                            });
+                        }
                     } else if (msg.active !== undefined) {
                         updateLoggingStatus(msg);
                     }
@@ -638,25 +761,7 @@
             document.getElementById('status-info').textContent = info;
         }
 
-        // Abort button handler
-        document.getElementById('abort_button').addEventListener('click', () => {
-            Swal.fire({
-                title: 'System Aborted',
-                text: 'DAQ monitoring aborted',
-                icon: 'warning',
-                timer: 2000
-            });
-        });
-
-        // Emergency stop handler
-        document.getElementById('emergency_stop').addEventListener('click', () => {
-            Swal.fire({
-                title: 'EMERGENCY STOP',
-                text: 'Emergency shutdown initiated',
-                icon: 'error',
-                confirmButtonColor: '#8b0000'
-            });
-        });
+        // Legacy handlers removed (no abort/estop on NI DAQ UI)
 
         // Initialize on load
         document.addEventListener('DOMContentLoaded', () => {

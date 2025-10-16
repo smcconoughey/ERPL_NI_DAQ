@@ -35,8 +35,9 @@ class PTCard(BaseDevice):
             # If autodetection fails, keep the provided module slot
             pass
         self.channel_count = 16
-        self.sample_rate = 500
-        self.samples_per_channel = 500
+        # Robust cadence: 100 Hz device sample rate, app updates ~10 Hz
+        self.sample_rate = 100
+        self.samples_per_channel = 10
         self.tare_offset = 0.0
         self.tared = False
         self.load_config()
@@ -84,11 +85,17 @@ class PTCard(BaseDevice):
         )
     
     def configure_timing(self, task: nidaqmx.Task) -> None:
+        # Continuous sampling; allocate a larger buffer and read windows per tick
         task.timing.cfg_samp_clk_timing(
             rate=self.sample_rate,
-            sample_mode=AcquisitionType.FINITE,
-            samps_per_chan=self.samples_per_channel
+            sample_mode=AcquisitionType.CONTINUOUS,
+            samps_per_chan=self.sample_rate * 5  # 5 seconds onboard buffer
         )
+        try:
+            # Increase host-side input buffer to tolerate brief stalls
+            task.in_stream.input_buf_size = int(self.sample_rate * 20)  # 20 seconds host buffer
+        except Exception:
+            pass
     
     @property
     def device_info(self) -> Dict[str, Any]:
