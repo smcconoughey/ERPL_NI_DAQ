@@ -353,6 +353,9 @@
                         PRESSURE TRANSDUCERS
                         <span class="telemetry-count" id="pt-count">16 channels</span>
                     </div>
+                    <button class="new-log-btn" onclick="tarePTs()" style="font-size: 12px; padding: 6px 12px;">
+                        <i class="fas fa-bullseye"></i> Tare PTs
+                    </button>
                 </div>
                 <div class="telemetry-grid" id="pt-readings"></div>
             </div>
@@ -626,6 +629,50 @@
                         ws.send(JSON.stringify({ action: 'tare_lc' }));
                     } catch (error) {
                         console.error('Failed to send tare command:', error);
+                        Swal.fire({
+                            title: 'Error',
+                            text: 'Failed to send tare command',
+                            icon: 'error',
+                            toast: true,
+                            position: 'top-end',
+                            timer: 2500,
+                            showConfirmButton: false,
+                            backdrop: false
+                        });
+                    }
+                }
+            });
+        }
+
+        function tarePTs() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                Swal.fire({
+                    title: 'Connection Error',
+                    text: 'WebSocket not connected',
+                    icon: 'error',
+                    toast: true,
+                    position: 'top-end',
+                    timer: 2500,
+                    showConfirmButton: false,
+                    backdrop: false
+                });
+                return;
+            }
+
+            Swal.fire({
+                title: 'Tare Pressure Transducers?',
+                text: 'This will zero all PT readings at their current values',
+                icon: 'question',
+                showCancelButton: true,
+                confirmButtonColor: '#3182ce',
+                cancelButtonColor: '#a0aec0',
+                confirmButtonText: 'Tare Now'
+            }).then((result) => {
+                if (result.isConfirmed) {
+                    try {
+                        ws.send(JSON.stringify({ action: 'tare_pt' }));
+                    } catch (error) {
+                        console.error('Failed to send tare PT command:', error);
                         Swal.fire({
                             title: 'Error',
                             text: 'Failed to send tare command',

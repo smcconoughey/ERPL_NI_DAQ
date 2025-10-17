@@ -26,7 +26,7 @@
     },
     {
       "channel": 1,
-      "name": "Tank Downstream",
+      "name": "Manifold",
       "id": "PT2E",
       "serial": "2A02FJW7H2V",
       "group": "lox",
@@ -38,7 +38,7 @@
     },
     {
       "channel": 2,
-      "name": "Manifold",
+      "name": "Tank Downstream",
       "id": "PT3E",
       "serial": "3A02FJW7H2V",
       "group": "lox",

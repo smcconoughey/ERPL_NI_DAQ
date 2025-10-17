@@ -117,6 +117,9 @@ class DAQWebSocketServer {
                     } else if (msg.action === 'tare_lc') {
                         const result = this.tareLCs();
                         ws.send(JSON.stringify(result));
+                    } else if (msg.action === 'tare_pt') {
+                        const result = this.tarePTs();
+                        ws.send(JSON.stringify(result));
                     } else {
                         console.log('Received message from client:', message.toString());
                     }
@@ -251,13 +254,25 @@ class DAQWebSocketServer {
     
     tareLCs() {
         try {
-            // Create tare command file for Python streamer to detect
-            const tareCmdPath = path.join(__dirname, 'tare.cmd');
-            fs.writeFileSync(tareCmdPath, 'tare');
-            console.log('Tare command sent to DAQ streamer');
+            // Targeted LC tare command file to avoid PT overrides
+            const tareCmdPath = path.join(__dirname, 'tare_lc.cmd');
+            fs.writeFileSync(tareCmdPath, 'tare_lc');
+            console.log('LC tare command sent to DAQ streamer');
             return { success: true, message: 'Tare command sent. Load cells will be tared on next data read.' };
         } catch (error) {
             console.error('Failed to send tare command:', error);
+            return { success: false, message: error.message };
+        }
+    }
+
+    tarePTs() {
+        try {
+            const tareCmdPath = path.join(__dirname, 'tare_pt.cmd');
+            fs.writeFileSync(tareCmdPath, 'tare_pt');
+            console.log('PT tare command sent to DAQ streamer');
+            return { success: true, message: 'Tare command sent. PTs will be tared on next data read.' };
+        } catch (error) {
+            console.error('Failed to send PT tare command:', error);
             return { success: false, message: error.message };
         }
     }

@@ -59,7 +59,9 @@ class DAQStreamer:
         self.status_file = Path(__file__).parent / 'logging_status.json'
         
         # Tare command file
-        self.tare_cmd_file = Path(__file__).parent / 'tare.cmd'
+        self.tare_cmd_file = Path(__file__).parent / 'tare.cmd'  # legacy: tare all
+        self.tare_lc_cmd_file = Path(__file__).parent / 'tare_lc.cmd'
+        self.tare_pt_cmd_file = Path(__file__).parent / 'tare_pt.cmd'
         self.start_log_cmd = Path(__file__).parent / 'start_logging.cmd'
         self.stop_log_cmd = Path(__file__).parent / 'stop_logging.cmd'
         
@@ -148,6 +150,11 @@ class DAQStreamer:
             except Exception as e:
                 logger.error(f"Failed to process logging cmd: {e}")
 
+            # Snapshot tare requests at top of cycle so we can apply across all devices
+            do_tare_all = self.tare_cmd_file.exists()
+            do_tare_lc = self.tare_lc_cmd_file.exists()
+            do_tare_pt = self.tare_pt_cmd_file.exists()
+
             for device, task in self._device_tasks:
                 try:
                     # Read a small window per cycle; non-blocking / short timeout
@@ -194,18 +201,21 @@ class DAQStreamer:
                         raw_data.append([0.0])
                     raw_data = raw_data[:device.channel_count]
 
-                    # Tare command check
-                    if self.tare_cmd_file.exists():
-                        try:
-                            if hasattr(device, 'tare'):
-                                device.tare(raw_data)
-                                logger.info(f"Tare executed for {device.device_info['device_type']}")
-                            try:
-                                self.tare_cmd_file.unlink()
-                            except FileNotFoundError:
-                                pass
-                        except Exception as e:
-                            logger.error(f"Failed to execute tare: {e}")
+                    # Tare command check (apply targeted or legacy to all)
+                    try:
+                        device_type = str(device.device_info.get('device_type', '')).lower()
+                        should_tare = False
+                        if do_tare_all:
+                            should_tare = True
+                        elif 'lc' in device_type and do_tare_lc:
+                            should_tare = True
+                        elif ('pt' in device_type or 'pressure' in device_type) and do_tare_pt:
+                            should_tare = True
+                        if should_tare and hasattr(device, 'tare'):
+                            device.tare(raw_data)
+                            logger.info(f"Tare executed for {device.device_info['device_type']}")
+                    except Exception as e:
+                        logger.error(f"Failed to execute tare: {e}")
 
                     processed_data = device.process_data(raw_data)
                     processed_data["timestamp"] = time.time()
@@ -228,6 +238,19 @@ class DAQStreamer:
 
                 except Exception as e:
                     logger.error(f"Error during acquisition on {device.device_info['device_type']} ({device.module_name}): {e}")
+
+            # After processing all devices, clear tare command files if present
+            try:
+                if do_tare_all and self.tare_cmd_file.exists():
+                    self.tare_cmd_file.unlink()
+                if do_tare_lc and self.tare_lc_cmd_file.exists():
+                    self.tare_lc_cmd_file.unlink()
+                if do_tare_pt and self.tare_pt_cmd_file.exists():
+                    self.tare_pt_cmd_file.unlink()
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
 
             # Emit merged frame to Node at 100 Hz cadence
             merged = {
