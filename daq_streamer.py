@@ -10,8 +10,9 @@ import threading
 import csv
 from datetime import datetime
 from pathlib import Path
-from typing import AsyncGenerator, Dict, Any
+from typing import AsyncGenerator, Dict, Any, List, Tuple
 import nidaqmx
+from nidaqmx.constants import AcquisitionType
 from config import (
     DAQ_HOST,
     DAQ_GRPC_PORT,
@@ -54,6 +55,13 @@ class DAQStreamer:
 
         # Persistent NI-DAQmx tasks (device -> task)
         self._device_tasks = []
+
+        # Combined-task mode (single hardware-timed task for all channels)
+        self._combined_task = None  # type: ignore[assignment]
+        self._combined_slices: List[Tuple[object, slice]] = []
+        self.sample_clock_hz: float = 100.0
+        self.samples_per_read: int = 10
+        self._accumulated_samples: int = 0
 
         # Logging status file for UI/Node to read
         self.status_file = Path(__file__).parent / 'logging_status.json'
@@ -115,18 +123,25 @@ class DAQStreamer:
 
         logger.info(f"Starting DAQ devices: {[d.device_info['device_type'] for d in self.devices]}")
 
-        # Create and start continuous tasks once
-        self._device_tasks = []
-        for device in self.devices:
-            try:
-                task = nidaqmx.Task()
-                device.configure_channels(task)
-                device.configure_timing(task)
-                task.start()
-                self._device_tasks.append((device, task))
-                logger.info(f"Started {device.device_info['device_type']} on {device.module_name}")
-            except Exception as e:
-                logger.error(f"Failed to start device {device.device_info['device_type']}: {e}")
+        # Attempt to start a single combined hardware-timed task that includes
+        # PT (NI-9208) and LC (NI-9237) channels together. This eliminates
+        # inter-task skew and ensures a shared sample clock.
+        combined_ok = self._start_combined_task()
+
+        # Fallback: legacy per-device independent tasks
+        if not combined_ok:
+            logger.warning("Combined-task startup failed. Falling back to per-device tasks (may add skew).")
+            self._device_tasks = []
+            for device in self.devices:
+                try:
+                    task = nidaqmx.Task()
+                    device.configure_channels(task)
+                    device.configure_timing(task)
+                    task.start()
+                    self._device_tasks.append((device, task))
+                    logger.info(f"Started {device.device_info['device_type']} on {device.module_name}")
+                except Exception as e:
+                    logger.error(f"Failed to start device {device.device_info['device_type']}: {e}")
 
         per_device_read_count = {id(d): 0 for d, _ in self._device_tasks}
 
@@ -155,89 +170,165 @@ class DAQStreamer:
             do_tare_lc = self.tare_lc_cmd_file.exists()
             do_tare_pt = self.tare_pt_cmd_file.exists()
 
-            for device, task in self._device_tasks:
+            if self._combined_task is not None:
+                # Single-task path: read a fixed-size, hardware-timed chunk and
+                # split by device. This ensures aligned sample indices.
                 try:
-                    # Read a small window per cycle; non-blocking / short timeout
-                    # Drain whatever is available up to our window; tolerate up to 100 ms
-                    raw_data = task.read(
-                        number_of_samples_per_channel=nidaqmx.constants.READ_ALL_AVAILABLE,
-                        timeout=0.10
+                    raw_all = self._combined_task.read(
+                        number_of_samples_per_channel=self.samples_per_read,
+                        timeout=0.20,
                     )
 
-                    # Debug summaries occasionally
-                    per_device_read_count[id(device)] += 1
-                    if DEBUG_ENABLE and isinstance(raw_data, list) and raw_data:
-                        if DEBUG_RAW_SUMMARY and (per_device_read_count[id(device)] % max(1, DEBUG_SAMPLE_EVERY_N) == 0):
-                            max_channels = min(8, len(raw_data))
-                            for ch in range(max_channels):
-                                samples = raw_data[ch]
-                                if not samples:
-                                    continue
-                                avg_a = sum(samples) / len(samples)
-                                min_a = min(samples)
-                                max_a = max(samples)
-                                logger.info(
-                                    f"{device.device_info['device_type']} ch{ch:02d} avg={avg_a:.6f} A  mA={(avg_a*1000):.3f}  n={len(samples)}"
-                                )
+                    # Defensive normalization to list-of-list per channel
+                    if isinstance(raw_all, (int, float)):
+                        total_channels = sum([d.channel_count for d in self.devices])
+                        raw_all = [[raw_all] for _ in range(total_channels)]
+                    elif isinstance(raw_all, list) and raw_all and not isinstance(raw_all[0], list):
+                        # Single sample per channel -> wrap
+                        total_channels = len(raw_all)
+                        raw_all = [[v] for v in raw_all]
 
-                    # Normalize shape
-                    if isinstance(raw_data, (int, float)):
-                        raw_data = [[raw_data] for _ in range(device.channel_count)]
-                    elif isinstance(raw_data, list):
-                        if len(raw_data) == 0:
-                            raw_data = [[0.0] for _ in range(device.channel_count)]
-                        elif not isinstance(raw_data[0], list):
-                            if len(raw_data) == device.channel_count:
-                                raw_data = [[val] for val in raw_data]
-                            elif len(raw_data) % device.channel_count == 0:
-                                raw_data = [raw_data[i::device.channel_count] for i in range(device.channel_count)]
-                            else:
-                                vals_per_chan = len(raw_data) // device.channel_count + 1
-                                raw_data = [raw_data[i:i+vals_per_chan] if i < len(raw_data) else [0.0] for i in range(0, device.channel_count)]
-                    else:
-                        raw_data = [[0.0] for _ in range(device.channel_count)]
+                    # Per-device handling
+                    for device, slc in self._combined_slices:
+                        device_channels = raw_all[slc]
 
-                    while len(raw_data) < device.channel_count:
-                        raw_data.append([0.0])
-                    raw_data = raw_data[:device.channel_count]
+                        # Optional debug log
+                        per_device_read_count[id(device)] += 1
+                        if DEBUG_ENABLE and isinstance(device_channels, list) and device_channels:
+                            if DEBUG_RAW_SUMMARY and (per_device_read_count[id(device)] % max(1, DEBUG_SAMPLE_EVERY_N) == 0):
+                                max_channels = min(8, len(device_channels))
+                                for ch in range(max_channels):
+                                    samples = device_channels[ch]
+                                    if not samples:
+                                        continue
+                                    avg_a = sum(samples) / len(samples)
+                                    logger.info(
+                                        f"{device.device_info['device_type']} ch{ch:02d} avg={avg_a:.6f} A  n={len(samples)}"
+                                    )
 
-                    # Tare command check (apply targeted or legacy to all)
-                    try:
-                        device_type = str(device.device_info.get('device_type', '')).lower()
-                        should_tare = False
-                        if do_tare_all:
-                            should_tare = True
-                        elif 'lc' in device_type and do_tare_lc:
-                            should_tare = True
-                        elif ('pt' in device_type or 'pressure' in device_type) and do_tare_pt:
-                            should_tare = True
-                        if should_tare and hasattr(device, 'tare'):
-                            device.tare(raw_data)
-                            logger.info(f"Tare executed for {device.device_info['device_type']}")
-                    except Exception as e:
-                        logger.error(f"Failed to execute tare: {e}")
+                        # Tare (per device) if requested
+                        try:
+                            device_type = str(getattr(device, 'device_info', {}).get('device_type', '')).lower()
+                            should_tare = False
+                            if do_tare_all:
+                                should_tare = True
+                            elif 'lc' in device_type and do_tare_lc:
+                                should_tare = True
+                            elif ('pt' in device_type or 'pressure' in device_type) and do_tare_pt:
+                                should_tare = True
+                            if should_tare and hasattr(device, 'tare'):
+                                device.tare(device_channels)
+                                logger.info(f"Tare executed for {device.device_info['device_type']}")
+                        except Exception as e:
+                            logger.error(f"Failed to execute tare: {e}")
 
-                    processed_data = device.process_data(raw_data)
-                    processed_data["timestamp"] = time.time()
-                    processed_data["source"] = device.device_info.get('device_type')
+                        processed_data = device.process_data(device_channels)
+                        processed_data["timestamp"] = time.time()
+                        processed_data["source"] = device.device_info.get('device_type')
 
-                    # Snapshot latest channels for merging
-                    channels = processed_data.get('channels', [])
-                    if channels:
-                        first = channels[0]
-                        if 'pressure_psi' in first:
-                            self._last_pt_channels = channels
-                        elif 'v_per_v' in first or 'lbf' in first:
-                            self._last_lc_channels = channels
+                        # Snapshot for merging
+                        channels = processed_data.get('channels', [])
+                        if channels:
+                            first = channels[0]
+                            if 'pressure_psi' in first:
+                                self._last_pt_channels = channels
+                            elif 'v_per_v' in first or 'lbf' in first:
+                                self._last_lc_channels = channels
 
-                    # Also send per-device frame for backward compatibility
-                    try:
-                        self.send_to_node_sync(processed_data)
-                    except Exception as e:
-                        logger.error(f"Failed to send per-device frame: {e}")
+                        # Send per-device frames for backward compatibility
+                        try:
+                            self.send_to_node_sync(processed_data)
+                        except Exception as e:
+                            logger.error(f"Failed to send per-device frame: {e}")
+
+                    # Advance the sample-based clock for logging/timestamping
+                    self._accumulated_samples += self.samples_per_read
 
                 except Exception as e:
-                    logger.error(f"Error during acquisition on {device.device_info['device_type']} ({device.module_name}): {e}")
+                    logger.error(f"Error during combined acquisition: {e}")
+            else:
+                # Legacy path: iterate per-device tasks
+                for device, task in self._device_tasks:
+                    try:
+                        raw_data = task.read(
+                            number_of_samples_per_channel=nidaqmx.constants.READ_ALL_AVAILABLE,
+                            timeout=0.10,
+                        )
+
+                        # Debug summaries occasionally
+                        per_device_read_count[id(device)] += 1
+                        if DEBUG_ENABLE and isinstance(raw_data, list) and raw_data:
+                            if DEBUG_RAW_SUMMARY and (per_device_read_count[id(device)] % max(1, DEBUG_SAMPLE_EVERY_N) == 0):
+                                max_channels = min(8, len(raw_data))
+                                for ch in range(max_channels):
+                                    samples = raw_data[ch]
+                                    if not samples:
+                                        continue
+                                    avg_a = sum(samples) / len(samples)
+                                    min_a = min(samples)
+                                    max_a = max(samples)
+                                    logger.info(
+                                        f"{device.device_info['device_type']} ch{ch:02d} avg={avg_a:.6f} A  mA={(avg_a*1000):.3f}  n={len(samples)}"
+                                    )
+
+                        # Normalize shape
+                        if isinstance(raw_data, (int, float)):
+                            raw_data = [[raw_data] for _ in range(device.channel_count)]
+                        elif isinstance(raw_data, list):
+                            if len(raw_data) == 0:
+                                raw_data = [[0.0] for _ in range(device.channel_count)]
+                            elif not isinstance(raw_data[0], list):
+                                if len(raw_data) == device.channel_count:
+                                    raw_data = [[val] for val in raw_data]
+                                elif len(raw_data) % device.channel_count == 0:
+                                    raw_data = [raw_data[i::device.channel_count] for i in range(device.channel_count)]
+                                else:
+                                    vals_per_chan = len(raw_data) // device.channel_count + 1
+                                    raw_data = [raw_data[i:i+vals_per_chan] if i < len(raw_data) else [0.0] for i in range(0, device.channel_count)]
+                        else:
+                            raw_data = [[0.0] for _ in range(device.channel_count)]
+
+                        while len(raw_data) < device.channel_count:
+                            raw_data.append([0.0])
+                        raw_data = raw_data[:device.channel_count]
+
+                        # Tare command check (apply targeted or legacy to all)
+                        try:
+                            device_type = str(device.device_info.get('device_type', '')).lower()
+                            should_tare = False
+                            if do_tare_all:
+                                should_tare = True
+                            elif 'lc' in device_type and do_tare_lc:
+                                should_tare = True
+                            elif ('pt' in device_type or 'pressure' in device_type) and do_tare_pt:
+                                should_tare = True
+                            if should_tare and hasattr(device, 'tare'):
+                                device.tare(raw_data)
+                                logger.info(f"Tare executed for {device.device_info['device_type']}")
+                        except Exception as e:
+                            logger.error(f"Failed to execute tare: {e}")
+
+                        processed_data = device.process_data(raw_data)
+                        processed_data["timestamp"] = time.time()
+                        processed_data["source"] = device.device_info.get('device_type')
+
+                        # Snapshot latest channels for merging
+                        channels = processed_data.get('channels', [])
+                        if channels:
+                            first = channels[0]
+                            if 'pressure_psi' in first:
+                                self._last_pt_channels = channels
+                            elif 'v_per_v' in first or 'lbf' in first:
+                                self._last_lc_channels = channels
+
+                        # Also send per-device frame for backward compatibility
+                        try:
+                            self.send_to_node_sync(processed_data)
+                        except Exception as e:
+                            logger.error(f"Failed to send per-device frame: {e}")
+
+                    except Exception as e:
+                        logger.error(f"Error during acquisition on {device.device_info['device_type']} ({device.module_name}): {e}")
 
             # After processing all devices, clear tare command files if present
             try:
@@ -292,6 +383,87 @@ class DAQStreamer:
             except Exception:
                 pass
         self._device_tasks = []
+        if self._combined_task is not None:
+            try:
+                self._combined_task.stop()
+            except Exception:
+                pass
+            try:
+                self._combined_task.close()
+            except Exception:
+                pass
+            self._combined_task = None
+
+    def _start_combined_task(self) -> bool:
+        """Try to start a single hardware-timed task that includes all channels.
+
+        Returns True on success, False to fall back to legacy independent tasks.
+        """
+        try:
+            if not self.devices:
+                return False
+
+            task = nidaqmx.Task()
+
+            # Add channels from all devices to this single task, recording their slices
+            self._combined_slices = []
+            chan_offset = 0
+            for device in self.devices:
+                before_count = len(task.ai_channels)
+                device.configure_channels(task)
+                after_count = len(task.ai_channels)
+                added = (after_count - before_count)
+                # If a device didn't add channels as expected, infer from its channel_count
+                if added <= 0:
+                    added = getattr(device, 'channel_count', 0)
+                self._combined_slices.append((device, slice(chan_offset, chan_offset + added)))
+                chan_offset += added
+
+            # Unify timing: choose a shared rate and buffer sizing
+            try:
+                rates = [float(getattr(d, 'sample_rate', 100.0)) for d in self.devices]
+                self.sample_clock_hz = min([r for r in rates if r > 0.0]) if rates else 100.0
+            except Exception:
+                self.sample_clock_hz = 100.0
+
+            try:
+                chunk_sizes = [int(getattr(d, 'samples_per_channel', 10)) for d in self.devices]
+                self.samples_per_read = max(1, min(chunk_sizes) if chunk_sizes else 10)
+            except Exception:
+                self.samples_per_read = 10
+
+            task.timing.cfg_samp_clk_timing(
+                rate=self.sample_clock_hz,
+                sample_mode=AcquisitionType.CONTINUOUS,
+                samps_per_chan=int(self.sample_clock_hz) * 5,
+            )
+            try:
+                task.in_stream.input_buf_size = int(self.sample_clock_hz * 20)
+            except Exception:
+                pass
+
+            task.start()
+
+            self._combined_task = task
+            self._accumulated_samples = 0
+            logger.info(
+                f"Combined task started @ {self.sample_clock_hz:.1f} Hz, chunk {self.samples_per_read} samples, total channels {chan_offset}"
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Could not start combined task: {e}")
+            # Ensure cleanup of any partially created task
+            try:
+                task.stop()  # type: ignore[name-defined]
+            except Exception:
+                pass
+            try:
+                task.close()  # type: ignore[name-defined]
+            except Exception:
+                pass
+            self._combined_task = None
+            self._combined_slices = []
+            return False
     
     def start_logging(self) -> Dict:
         """Start CSV logging with timestamped filename"""
@@ -397,7 +569,11 @@ class DAQStreamer:
         with self.log_lock:
             # Use UTC ISO format with Z suffix for clarity
             timestamp = datetime.utcnow().isoformat() + 'Z'
-            elapsed_ms = int((time.time() - self.log_start_time) * 1000) if self.log_start_time else 0
+            # Base elapsed on sample index and sample clock, not wall clock
+            if self.sample_clock_hz > 0.0:
+                elapsed_ms = int((self._accumulated_samples / self.sample_clock_hz) * 1000)
+            else:
+                elapsed_ms = 0
 
             ptPsi = [''] * 16
             ptmA = [''] * 16
