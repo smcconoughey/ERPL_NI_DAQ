@@ -12,7 +12,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import AsyncGenerator, Dict, Any, List, Tuple
 import nidaqmx
-from nidaqmx.constants import AcquisitionType
 from config import (
     DAQ_HOST,
     DAQ_GRPC_PORT,
@@ -65,7 +64,7 @@ class DAQStreamer:
         self.loop_period_s: float = 0.10
         self.read_timeout_s: float = 0.20
         self._pending_log_rows: List[Dict[str, List[Any]]] = []
-
+        
         # Logging status file for UI/Node to read
         self.status_file = Path(__file__).parent / 'logging_status.json'
         
@@ -126,25 +125,18 @@ class DAQStreamer:
 
         logger.info(f"Starting DAQ devices: {[d.device_info['device_type'] for d in self.devices]}")
 
-        # Attempt to start a single combined hardware-timed task that includes
-        # PT (NI-9208) and LC (NI-9237) channels together. This eliminates
-        # inter-task skew and ensures a shared sample clock.
-        combined_ok = self._start_combined_task()
-
-        # Fallback: legacy per-device independent tasks
-        if not combined_ok:
-            logger.warning("Combined-task startup failed. Falling back to per-device tasks (may add skew).")
-            self._device_tasks = []
-            for device in self.devices:
-                try:
-                    task = nidaqmx.Task()
-                    device.configure_channels(task)
-                    device.configure_timing(task)
-                    task.start()
-                    self._device_tasks.append((device, task))
-                    logger.info(f"Started {device.device_info['device_type']} on {device.module_name}")
-                except Exception as e:
-                    logger.error(f"Failed to start device {device.device_info['device_type']}: {e}")
+        # Create and start continuous tasks once
+        self._device_tasks = []
+        for device in self.devices:
+            try:
+                task = nidaqmx.Task()
+                device.configure_channels(task)
+                device.configure_timing(task)
+                task.start()
+                self._device_tasks.append((device, task))
+                logger.info(f"Started {device.device_info['device_type']} on {device.module_name}")
+            except Exception as e:
+                logger.error(f"Failed to start device {device.device_info['device_type']}: {e}")
 
             # Derive loop timing from the configured device rates so logging cadence is realistic
             try:
@@ -201,61 +193,71 @@ class DAQStreamer:
                         timeout=self.read_timeout_s,
                     )
 
-                    # Defensive normalization to list-of-list per channel
+                    # Debug summaries occasionally
+                    per_device_read_count[id(device)] += 1
+                    if DEBUG_ENABLE and isinstance(raw_all, list) and raw_all:
+                        if DEBUG_RAW_SUMMARY and (per_device_read_count[id(device)] % max(1, DEBUG_SAMPLE_EVERY_N) == 0):
+                            max_channels = min(8, len(raw_all))
+                            for ch in range(max_channels):
+                                samples = raw_all[ch]
+                                if not samples:
+                                    continue
+                                avg_a = sum(samples) / len(samples)
+                                min_a = min(samples)
+                                max_a = max(samples)
+                                logger.info(
+                                    f"{device.device_info['device_type']} ch{ch:02d} avg={avg_a:.6f} A  mA={(avg_a*1000):.3f}  n={len(samples)}"
+                                )
+
+                    # Normalize shape
                     if isinstance(raw_all, (int, float)):
-                        total_channels = sum([d.channel_count for d in self.devices])
-                        raw_all = [[raw_all] for _ in range(total_channels)]
-                    elif isinstance(raw_all, list) and raw_all and not isinstance(raw_all[0], list):
-                        # Single sample per channel -> wrap
-                        total_channels = len(raw_all)
-                        raw_all = [[v] for v in raw_all]
+                        raw_all = [[raw_all] for _ in range(device.channel_count)]
+                    elif isinstance(raw_all, list):
+                        if len(raw_all) == 0:
+                            raw_all = [[0.0] for _ in range(device.channel_count)]
+                        elif not isinstance(raw_all[0], list):
+                            if len(raw_all) == device.channel_count:
+                                raw_all = [[val] for val in raw_all]
+                            elif len(raw_all) % device.channel_count == 0:
+                                raw_all = [raw_all[i::device.channel_count] for i in range(device.channel_count)]
+                            else:
+                                vals_per_chan = len(raw_all) // device.channel_count + 1
+                                raw_all = [raw_all[i:i+vals_per_chan] if i < len(raw_all) else [0.0] for i in range(0, device.channel_count)]
+                    else:
+                        raw_all = [[0.0] for _ in range(device.channel_count)]
 
-                    # Per-device handling
-                    for device, slc in self._combined_slices:
-                        device_channels = raw_all[slc]
+                    while len(raw_all) < device.channel_count:
+                        raw_all.append([0.0])
+                    raw_all = raw_all[:device.channel_count]
 
-                        # Optional debug log
-                        per_device_read_count[id(device)] += 1
-                        if DEBUG_ENABLE and isinstance(device_channels, list) and device_channels:
-                            if DEBUG_RAW_SUMMARY and (per_device_read_count[id(device)] % max(1, DEBUG_SAMPLE_EVERY_N) == 0):
-                                max_channels = min(8, len(device_channels))
-                                for ch in range(max_channels):
-                                    samples = device_channels[ch]
-                                    if not samples:
-                                        continue
-                                    avg_a = sum(samples) / len(samples)
-                                    logger.info(
-                                        f"{device.device_info['device_type']} ch{ch:02d} avg={avg_a:.6f} A  n={len(samples)}"
-                                    )
+                    # Tare command check (apply targeted or legacy to all)
+                    try:
+                        device_type = str(device.device_info.get('device_type', '')).lower()
+                        should_tare = False
+                        if do_tare_all:
+                            should_tare = True
+                        elif 'lc' in device_type and do_tare_lc:
+                            should_tare = True
+                        elif ('pt' in device_type or 'pressure' in device_type) and do_tare_pt:
+                            should_tare = True
+                        if should_tare and hasattr(device, 'tare'):
+                            device.tare(raw_all)
+                            logger.info(f"Tare executed for {device.device_info['device_type']}")
+                    except Exception as e:
+                        logger.error(f"Failed to execute tare: {e}")
 
-                        # Tare (per device) if requested
-                        try:
-                            device_type = str(getattr(device, 'device_info', {}).get('device_type', '')).lower()
-                            should_tare = False
-                            if do_tare_all:
-                                should_tare = True
-                            elif 'lc' in device_type and do_tare_lc:
-                                should_tare = True
-                            elif ('pt' in device_type or 'pressure' in device_type) and do_tare_pt:
-                                should_tare = True
-                            if should_tare and hasattr(device, 'tare'):
-                                device.tare(device_channels)
-                                logger.info(f"Tare executed for {device.device_info['device_type']}")
-                        except Exception as e:
-                            logger.error(f"Failed to execute tare: {e}")
+                    processed_data = device.process_data(raw_all)
+                    processed_data["timestamp"] = time.time()
+                    processed_data["source"] = device.device_info.get('device_type')
 
-                        processed_data = device.process_data(device_channels)
-                        processed_data["timestamp"] = time.time()
-                        processed_data["source"] = device.device_info.get('device_type')
-
-                        # Snapshot for merging
-                        channels = processed_data.get('channels', [])
-                        if channels:
-                            first = channels[0]
-                            if 'pressure_psi' in first:
-                                self._last_pt_channels = channels
-                            elif 'v_per_v' in first or 'lbf' in first:
-                                self._last_lc_channels = channels
+                    # Snapshot latest channels for merging
+                    channels = processed_data.get('channels', [])
+                    if channels:
+                        first = channels[0]
+                        if 'pressure_psi' in first:
+                            self._last_pt_channels = channels
+                        elif 'v_per_v' in first or 'lbf' in first:
+                            self._last_lc_channels = channels
 
                         device_key = self._device_key(device)
                         if device_key:
@@ -471,7 +473,7 @@ class DAQStreamer:
 
             task.timing.cfg_samp_clk_timing(
                 rate=self.sample_clock_hz,
-                sample_mode=AcquisitionType.CONTINUOUS,
+                sample_mode=nidaqmx.constants.AcquisitionType.CONTINUOUS,
                 samps_per_chan=int(self.sample_clock_hz) * 5,
             )
             try:
