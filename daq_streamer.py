@@ -62,6 +62,9 @@ class DAQStreamer:
         self.sample_clock_hz: float = 100.0
         self.samples_per_read: int = 10
         self._accumulated_samples: int = 0
+        self.loop_period_s: float = 0.10
+        self.read_timeout_s: float = 0.20
+        self._pending_log_rows: List[Dict[str, List[Any]]] = []
 
         # Logging status file for UI/Node to read
         self.status_file = Path(__file__).parent / 'logging_status.json'
@@ -143,9 +146,26 @@ class DAQStreamer:
                 except Exception as e:
                     logger.error(f"Failed to start device {device.device_info['device_type']}: {e}")
 
+            # Derive loop timing from the configured device rates so logging cadence is realistic
+            try:
+                rates = [float(getattr(d, 'sample_rate', 0.0)) for d, _ in self._device_tasks]
+                rates = [r for r in rates if r > 0.0]
+                if rates:
+                    self.sample_clock_hz = min(rates)
+            except Exception:
+                pass
+            try:
+                chunk_sizes = [int(getattr(d, 'samples_per_channel', 0)) for d, _ in self._device_tasks]
+                chunk_sizes = [c for c in chunk_sizes if c > 0]
+                if chunk_sizes:
+                    self.samples_per_read = min(chunk_sizes)
+            except Exception:
+                pass
+            self._recompute_loop_timing()
+
         per_device_read_count = {id(d): 0 for d, _ in self._device_tasks}
 
-        target_period_s = 0.10  # 10 Hz
+        target_period_s = self.loop_period_s
         while self.running:
             loop_t0 = time.time()
             # Handle start/stop logging requests from Node via command files
@@ -170,13 +190,15 @@ class DAQStreamer:
             do_tare_lc = self.tare_lc_cmd_file.exists()
             do_tare_pt = self.tare_pt_cmd_file.exists()
 
+            device_samples_map: Dict[str, List[List[Dict[str, Any]]]] = {}
+
             if self._combined_task is not None:
                 # Single-task path: read a fixed-size, hardware-timed chunk and
                 # split by device. This ensures aligned sample indices.
                 try:
                     raw_all = self._combined_task.read(
                         number_of_samples_per_channel=self.samples_per_read,
-                        timeout=0.20,
+                        timeout=self.read_timeout_s,
                     )
 
                     # Defensive normalization to list-of-list per channel
@@ -235,14 +257,17 @@ class DAQStreamer:
                             elif 'v_per_v' in first or 'lbf' in first:
                                 self._last_lc_channels = channels
 
+                        device_key = self._device_key(device)
+                        if device_key:
+                            samples = processed_data.get('samples')
+                            if isinstance(samples, list):
+                                device_samples_map[device_key] = samples
+
                         # Send per-device frames for backward compatibility
                         try:
                             self.send_to_node_sync(processed_data)
                         except Exception as e:
                             logger.error(f"Failed to send per-device frame: {e}")
-
-                    # Advance the sample-based clock for logging/timestamping
-                    self._accumulated_samples += self.samples_per_read
 
                 except Exception as e:
                     logger.error(f"Error during combined acquisition: {e}")
@@ -252,7 +277,7 @@ class DAQStreamer:
                     try:
                         raw_data = task.read(
                             number_of_samples_per_channel=nidaqmx.constants.READ_ALL_AVAILABLE,
-                            timeout=0.10,
+                            timeout=self.read_timeout_s,
                         )
 
                         # Debug summaries occasionally
@@ -321,6 +346,12 @@ class DAQStreamer:
                             elif 'v_per_v' in first or 'lbf' in first:
                                 self._last_lc_channels = channels
 
+                        device_key = self._device_key(device)
+                        if device_key:
+                            samples = processed_data.get('samples')
+                            if isinstance(samples, list):
+                                device_samples_map[device_key] = samples
+
                         # Also send per-device frame for backward compatibility
                         try:
                             self.send_to_node_sync(processed_data)
@@ -329,6 +360,12 @@ class DAQStreamer:
 
                     except Exception as e:
                         logger.error(f"Error during acquisition on {device.device_info['device_type']} ({device.module_name}): {e}")
+
+            if device_samples_map:
+                try:
+                    self._queue_sample_rows(device_samples_map)
+                except Exception as e:
+                    logger.error(f"Failed to queue samples for logging: {e}")
 
             # After processing all devices, clear tare command files if present
             try:
@@ -446,6 +483,7 @@ class DAQStreamer:
 
             self._combined_task = task
             self._accumulated_samples = 0
+            self._recompute_loop_timing()
             logger.info(
                 f"Combined task started @ {self.sample_clock_hz:.1f} Hz, chunk {self.samples_per_read} samples, total channels {chan_offset}"
             )
@@ -464,6 +502,75 @@ class DAQStreamer:
             self._combined_task = None
             self._combined_slices = []
             return False
+
+    def _recompute_loop_timing(self) -> None:
+        """Derive loop/timeout settings from the active sampling configuration."""
+        if self.sample_clock_hz > 0 and self.samples_per_read > 0:
+            expected_period = self.samples_per_read / self.sample_clock_hz
+            # Ensure we do not spin faster than hardware can provide fresh data
+            self.loop_period_s = max(0.001, expected_period)
+            # Allow a little slack so the read does not time out before samples arrive
+            self.read_timeout_s = max(0.05, expected_period * 1.5)
+        else:
+            # Sensible defaults if configuration is missing or invalid
+            self.loop_period_s = 0.10
+            self.read_timeout_s = 0.20
+
+    def _device_key(self, device: Any) -> str:
+        try:
+            dtype = str(getattr(device, 'device_info', {}).get('device_type', '')).lower()
+        except Exception:
+            dtype = ''
+        if 'pt' in dtype or 'pressure' in dtype:
+            return 'pt'
+        if 'lc' in dtype or 'load' in dtype:
+            return 'lc'
+        return ''
+
+    def _queue_sample_rows(self, sample_map: Dict[str, List[List[Dict[str, Any]]]]) -> None:
+        if not self.logging_enabled:
+            return
+
+        max_samples = 0
+        for samples in sample_map.values():
+            if isinstance(samples, list):
+                max_samples = max(max_samples, len(samples))
+
+        if max_samples == 0:
+            return
+
+        for sample_idx in range(max_samples):
+            ptPsi = [''] * 16
+            ptmA = [''] * 16
+            lcLbf = [''] * 4
+            lcVv = [''] * 4
+
+            pt_samples = sample_map.get('pt')
+            if isinstance(pt_samples, list) and sample_idx < len(pt_samples):
+                for entry in pt_samples[sample_idx]:
+                    idx = entry.get('channel')
+                    if isinstance(idx, int) and 0 <= idx < 16:
+                        if 'pressure_psi' in entry:
+                            ptPsi[idx] = entry['pressure_psi']
+                        if 'current_ma' in entry:
+                            ptmA[idx] = entry['current_ma']
+
+            lc_samples = sample_map.get('lc')
+            if isinstance(lc_samples, list) and sample_idx < len(lc_samples):
+                for entry in lc_samples[sample_idx]:
+                    idx = entry.get('channel')
+                    if isinstance(idx, int) and 0 <= idx < 4:
+                        if 'lbf' in entry:
+                            lcLbf[idx] = entry['lbf']
+                        if 'v_per_v' in entry:
+                            lcVv[idx] = entry['v_per_v']
+
+            self._pending_log_rows.append({
+                'ptPsi': ptPsi,
+                'ptmA': ptmA,
+                'lcLbf': lcLbf,
+                'lcVv': lcVv,
+            })
     
     def start_logging(self) -> Dict:
         """Start CSV logging with timestamped filename"""
@@ -508,7 +615,9 @@ class DAQStreamer:
             self.log_filename = str(log_path)
             self.log_data_count = 0
             self.log_start_time = time.time()
-            
+            self._pending_log_rows = []
+            self._accumulated_samples = 0
+
             logger.info(f"Started CSV logging: {self.log_filename}")
             try:
                 self._write_logging_status_file(active=True)
@@ -533,7 +642,9 @@ class DAQStreamer:
             if self.log_file:
                 self.log_file.close()
                 self.log_file = None
-            
+            self._pending_log_rows = []
+            self.log_start_time = None
+
             logger.info(f"Stopped CSV logging. Wrote {self.log_data_count} rows to {self.log_filename}")
             filename = self.log_filename
             rows = self.log_data_count
@@ -567,59 +678,33 @@ class DAQStreamer:
             return
 
         with self.log_lock:
-            # Use UTC ISO format with Z suffix for clarity
-            timestamp = datetime.utcnow().isoformat() + 'Z'
-            # Base elapsed on sample index and sample clock, not wall clock
-            if self.sample_clock_hz > 0.0:
-                elapsed_ms = int((self._accumulated_samples / self.sample_clock_hz) * 1000)
-            else:
-                elapsed_ms = 0
+            while self._pending_log_rows:
+                sample = self._pending_log_rows.pop(0)
 
-            ptPsi = [''] * 16
-            ptmA = [''] * 16
-            lcLbf = [''] * 4
-            lcVv = [''] * 4
+                if self.sample_clock_hz > 0.0 and self.log_start_time:
+                    base_time = self.log_start_time + (self._accumulated_samples / self.sample_clock_hz)
+                    timestamp = datetime.utcfromtimestamp(base_time).isoformat() + 'Z'
+                    elapsed_ms = int((self._accumulated_samples / self.sample_clock_hz) * 1000)
+                else:
+                    timestamp = datetime.utcnow().isoformat() + 'Z'
+                    elapsed_ms = 0
 
-            # Fill PT arrays
-            for ch in (self._last_pt_channels or []):
-                try:
-                    idx = int(ch.get('channel', -1))
-                except Exception:
-                    idx = -1
-                if 0 <= idx < 16:
-                    if 'pressure_psi' in ch:
-                        ptPsi[idx] = ch.get('pressure_psi', '')
-                    if 'current_ma' in ch:
-                        ptmA[idx] = ch.get('current_ma', '')
+                row = [timestamp, elapsed_ms]
+                row.extend(sample['ptPsi'])
+                row.extend(sample['ptmA'])
+                row.extend(sample['lcLbf'])
+                row.extend(sample['lcVv'])
 
-            # Fill LC arrays
-            for ch in (self._last_lc_channels or []):
-                try:
-                    idx = int(ch.get('channel', -1))
-                except Exception:
-                    idx = -1
-                if 0 <= idx < 4:
-                    if 'lbf' in ch:
-                        lcLbf[idx] = ch.get('lbf', '')
-                    if 'v_per_v' in ch:
-                        lcVv[idx] = ch.get('v_per_v', '')
+                self.log_writer.writerow(row)
+                self.log_data_count += 1
+                self._accumulated_samples += 1
 
-            row = [timestamp, elapsed_ms]
-            row.extend(ptPsi)
-            row.extend(ptmA)
-            row.extend(lcLbf)
-            row.extend(lcVv)
-
-            self.log_writer.writerow(row)
-            self.log_data_count += 1
-
-            # Flush every 10 rows to ensure data is written
-            if self.log_data_count % 10 == 0:
-                self.log_file.flush()
-                try:
-                    self._write_logging_status_file(active=True)
-                except Exception:
-                    pass
+                if self.log_data_count % 10 == 0:
+                    self.log_file.flush()
+                    try:
+                        self._write_logging_status_file(active=True)
+                    except Exception:
+                        pass
 
     def _write_logging_status_file(self, active: bool, filename: str = None, rows: int = None) -> None:
         """Persist logging status for Node/UI to read."""

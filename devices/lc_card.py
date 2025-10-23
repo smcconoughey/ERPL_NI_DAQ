@@ -193,21 +193,23 @@ class LCCard(BaseDevice):
 
     def process_data(self, raw_data: List[List[float]]) -> Dict[str, Any]:
         result: List[Dict[str, Any]] = []
+        per_sample_records: List[List[Dict[str, Any]]] = []
         if not isinstance(raw_data, list):
-            return {'channels': result}
+            return {'channels': result, 'samples': []}
+
         for ch_idx in range(min(self.channel_count, len(raw_data))):
             samples = raw_data[ch_idx] if isinstance(raw_data[ch_idx], list) else []
             if not samples:
                 avg_v_per_v = 0.0
             else:
                 avg_v_per_v = sum(samples) / len(samples)
-            
+
             info = self._get_sensor_info(ch_idx)
             status = 'ok'
-            
+
             # Convert to lbf using calibration
             lbf = self.convert_to_lbf(avg_v_per_v, ch_idx)
-            
+
             result.append({
                 'channel': ch_idx,
                 'name': info['name'],
@@ -218,6 +220,20 @@ class LCCard(BaseDevice):
                 'status': status,
                 'units': 'lbf'
             })
-        return {'channels': result}
+
+            for sample_idx, sample_val in enumerate(samples):
+                while len(per_sample_records) <= sample_idx:
+                    per_sample_records.append([])
+
+                sample_lbf = self.convert_to_lbf(sample_val, ch_idx)
+                per_sample_records[sample_idx].append({
+                    'channel': ch_idx,
+                    'v_per_v': round(sample_val, 6),
+                    'lbf': round(sample_lbf, 3),
+                    'status': status,
+                })
+
+        return {'channels': result, 'samples': per_sample_records}
+
 
 
