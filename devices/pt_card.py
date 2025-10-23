@@ -154,33 +154,59 @@ class PTCard(BaseDevice):
             }
     
     def process_data(self, raw_data: List[List[float]]) -> Dict[str, Any]:
-        if isinstance(raw_data, list) and len(raw_data) > 0 and isinstance(raw_data[0], list):
-            processed_channels = []
-            for channel_idx, channel_data in enumerate(raw_data):
-                if len(channel_data) > 0:
-                    # Average the samples for better noise reduction
-                    avg_current = sum(channel_data) / len(channel_data)
-                    current_ma = avg_current * 1000
-                    status = 'ok'
-                    if current_ma < 3.0 or current_ma > 25.0:
-                        status = 'disconnected'
-                    try:
-                        psi = self.convert_to_pressure(current_ma, channel_idx) if status == 'ok' else 0.0
-                    except Exception:
-                        status = 'unconfigured'
-                        psi = 0.0
-                    sensor_info = self.get_sensor_info(channel_idx)
-                    
-                    processed_channels.append({
-                        'channel': channel_idx,
-                        'name': sensor_info['name'],
-                        'id': sensor_info['id'],
-                        'group': sensor_info['group'],
-                        'current_ma': round(current_ma, 2),
-                        'status': status,
-                        'pressure_psi': round(psi, 2),  # Changed from pressure_ksi
-                        'units': 'psi'  # Changed from ksi
-                    })
-            return {'channels': processed_channels}
-        else:
-            return {'channels': []} 
+        if not (isinstance(raw_data, list) and raw_data and isinstance(raw_data[0], list)):
+            return {'channels': [], 'samples': []}
+
+        processed_channels: List[Dict[str, Any]] = []
+        per_sample_records: List[List[Dict[str, Any]]] = []
+
+        for channel_idx, channel_data in enumerate(raw_data):
+            if not isinstance(channel_data, list) or not channel_data:
+                continue
+
+            # Average the samples for better noise reduction
+            avg_current = sum(channel_data) / len(channel_data)
+            current_ma = avg_current * 1000
+            status = 'ok'
+            if current_ma < 3.0 or current_ma > 25.0:
+                status = 'disconnected'
+            try:
+                psi = self.convert_to_pressure(current_ma, channel_idx) if status == 'ok' else 0.0
+            except Exception:
+                status = 'unconfigured'
+                psi = 0.0
+            sensor_info = self.get_sensor_info(channel_idx)
+
+            processed_channels.append({
+                'channel': channel_idx,
+                'name': sensor_info['name'],
+                'id': sensor_info['id'],
+                'group': sensor_info['group'],
+                'current_ma': round(current_ma, 2),
+                'status': status,
+                'pressure_psi': round(psi, 2),
+                'units': 'psi'
+            })
+
+            for sample_idx, sample_val in enumerate(channel_data):
+                while len(per_sample_records) <= sample_idx:
+                    per_sample_records.append([])
+
+                sample_ma = sample_val * 1000.0
+                sample_status = 'ok'
+                if sample_ma < 3.0 or sample_ma > 25.0:
+                    sample_status = 'disconnected'
+                try:
+                    sample_psi = self.convert_to_pressure(sample_ma, channel_idx) if sample_status == 'ok' else 0.0
+                except Exception:
+                    sample_status = 'unconfigured'
+                    sample_psi = 0.0
+
+                per_sample_records[sample_idx].append({
+                    'channel': channel_idx,
+                    'current_ma': round(sample_ma, 2),
+                    'pressure_psi': round(sample_psi, 2),
+                    'status': sample_status,
+                })
+
+        return {'channels': processed_channels, 'samples': per_sample_records}
