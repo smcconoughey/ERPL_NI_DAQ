@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import AsyncGenerator, Dict, Any, List, Tuple
 import nidaqmx
+from nidaqmx.constants import AcquisitionType
 from config import (
     DAQ_HOST,
     DAQ_GRPC_PORT,
@@ -259,11 +260,11 @@ class DAQStreamer:
                         elif 'v_per_v' in first or 'lbf' in first:
                             self._last_lc_channels = channels
 
-                        device_key = self._device_key(device)
-                        if device_key:
-                            samples = processed_data.get('samples')
-                            if isinstance(samples, list):
-                                device_samples_map[device_key] = samples
+                    device_key = self._device_key(device)
+                    if device_key:
+                        samples = processed_data.get('samples')
+                        if isinstance(samples, list):
+                            device_samples_map[device_key] = samples
 
                         # Send per-device frames for backward compatibility
                         try:
@@ -473,7 +474,7 @@ class DAQStreamer:
 
             task.timing.cfg_samp_clk_timing(
                 rate=self.sample_clock_hz,
-                sample_mode=nidaqmx.constants.AcquisitionType.CONTINUOUS,
+                sample_mode=AcquisitionType.CONTINUOUS,
                 samps_per_chan=int(self.sample_clock_hz) * 5,
             )
             try:
@@ -573,7 +574,9 @@ class DAQStreamer:
                 'lcLbf': lcLbf,
                 'lcVv': lcVv,
             })
-    
+
+        # After queuing, we can write rows during logging flush
+
     def start_logging(self) -> Dict:
         """Start CSV logging with timestamped filename"""
         if self.logging_enabled:
