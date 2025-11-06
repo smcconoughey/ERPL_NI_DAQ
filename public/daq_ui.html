@@ -360,6 +360,18 @@
             <i class="fas fa-chart-line"></i>
             <span id="message-count">0 messages</span>
         </div>
+        <div class="info-item">
+            <i class="fas fa-tachometer-alt"></i>
+            <span id="perf-latency" title="Average read latency">Latency: --</span>
+        </div>
+        <div class="info-item">
+            <i class="fas fa-check-circle"></i>
+            <span id="perf-stale" title="Stale data percentage">Fresh: 100%</span>
+        </div>
+        <div class="info-item">
+            <i class="fas fa-redo"></i>
+            <span id="perf-restarts" title="Task restart count">Restarts: 0</span>
+        </div>
     </div>
 
     <div class="main-container">
@@ -775,6 +787,34 @@
                     } else if (msg.type === 'data' && msg.data) {
                         messageCount++;
                         document.getElementById('message-count').textContent = `${messageCount} messages`;
+                        
+                        // Update performance monitoring display
+                        if (msg.data.performance) {
+                            const perf = msg.data.performance;
+                            const latencyEl = document.getElementById('perf-latency');
+                            const staleEl = document.getElementById('perf-stale');
+                            
+                            if (latencyEl && typeof perf.avg_latency_ms === 'number') {
+                                const latency = perf.avg_latency_ms;
+                                const color = latency < 10 ? '#10b981' : latency < 50 ? '#f59e0b' : '#ef4444';
+                                latencyEl.innerHTML = `Latency: <span style="color: ${color}; font-weight: bold;">${latency.toFixed(1)}ms</span>`;
+                            }
+                            
+                            if (staleEl && typeof perf.stale_percentage === 'number') {
+                                const freshPct = 100 - perf.stale_percentage;
+                                const color = freshPct > 99 ? '#10b981' : freshPct > 95 ? '#f59e0b' : '#ef4444';
+                                staleEl.innerHTML = `Fresh: <span style="color: ${color}; font-weight: bold;">${freshPct.toFixed(1)}%</span>`;
+                            }
+                            
+                            const restartsEl = document.getElementById('perf-restarts');
+                            if (restartsEl && typeof perf.task_restarts === 'number') {
+                                const restarts = perf.task_restarts;
+                                const color = restarts === 0 ? '#10b981' : restarts < 5 ? '#f59e0b' : '#ef4444';
+                                const detail = perf.restart_counts ? 
+                                    Object.entries(perf.restart_counts).map(([k,v]) => `${k}:${v}`).join(' ') : '';
+                                restartsEl.innerHTML = `Restarts: <span style="color: ${color}; font-weight: bold;" title="${detail}">${restarts}</span>`;
+                            }
+                        }
                         
                         if (msg.data.channels && msg.data.channels.length > 0) {
                             const pt = msg.data.channels.filter(ch => 'pressure_psi' in ch);

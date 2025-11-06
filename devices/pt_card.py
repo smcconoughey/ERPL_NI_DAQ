@@ -35,8 +35,9 @@ class PTCard(BaseDevice):
             # If autodetection fails, keep the provided module slot
             pass
         self.channel_count = 16
-        # 200 Hz device sample rate
-        self.sample_rate = 20
+        # Default to 100 Hz for true 100 Hz acquisition (will be hardware-timed)
+        self.sample_rate = 100.0
+        # Match LC card: single-sample reads for consistent behavior
         self.samples_per_channel = 1
         # Per-channel tare offset in PSI
         self.tare_offsets: Dict[int, float] = {}
@@ -106,27 +107,40 @@ class PTCard(BaseDevice):
         )
     
     def configure_timing(self, task: nidaqmx.Task) -> None:
+        """Configure hardware-timed continuous sampling with proper buffer sizing.
+        
+        Per NI literature:
+        - Use HIGH_SPEED mode for 100 Hz (2 ms/channel conversion)
+        - HIGH_RESOLUTION mode (52 ms/channel) is better for < 20 Hz but slower
+        - Hardware-timed continuous sampling avoids stale/duplicate data
+        """
         task.timing.cfg_samp_clk_timing(
             rate=self.sample_rate,
             sample_mode=AcquisitionType.CONTINUOUS,
-            samps_per_chan=self.sample_rate * 10 # 10 seconds onboard buffer
+            samps_per_chan=int(self.sample_rate * 10)  # 10 seconds onboard buffer
         )
         try:
-            task.in_stream.input_buf_size = int(self.sample_rate * 40) # 40 seconds host buffer
+            # 60 seconds of host buffer for safety
+            task.in_stream.input_buf_size = int(self.sample_rate * 60)
         except Exception:
             pass
-        # Prefer non-blocking reads of the latest chunk
+        
+        # Configure ADC timing mode based on sample rate
+        # For 100 Hz: HIGH_SPEED mode (2 ms/channel, up to 500 S/s)
+        # For ≤ 10 Hz: Could use HIGH_RESOLUTION (52 ms/channel, ~19 S/s) for better accuracy
         try:
-            task.in_stream.over_write = nidaqmx.constants.OverwriteMode.OVERWRITE_OLDEST
-            task.in_stream.read_relative_to = nidaqmx.constants.ReadRelativeTo.MOST_RECENT_SAMPLE
-            task.in_stream.offset = -self.samples_per_channel
-        except Exception:
-            pass
-        # Force high-speed conversion mode on every channel if available
-        try:
-            task.ai_channels.all.ai_adc_timing_mode = nidaqmx.constants.ADCTimingMode.HIGH_SPEED
-        except Exception:
-            pass
+            if self.sample_rate >= 50.0:
+                # High-speed mode required for 100 Hz across multiple channels
+                task.ai_channels.all.ai_adc_timing_mode = nidaqmx.constants.ADCTimingMode.HIGH_SPEED
+                logger.info("NI-9208: Configured HIGH_SPEED ADC mode for 100 Hz sampling")
+            else:
+                # High-resolution mode for better accuracy at low rates (10 Hz)
+                task.ai_channels.all.ai_adc_timing_mode = nidaqmx.constants.ADCTimingMode.HIGH_RESOLUTION
+                logger.info("NI-9208: Configured HIGH_RESOLUTION ADC mode for low-rate sampling")
+        except Exception as e:
+            logger.warning(f"Could not set ADC timing mode: {e}")
+        
+        # Disable digital filtering to reduce latency
         try:
             task.ai_channels.all.ai_digital_filter_enable = False
         except Exception:

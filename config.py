@@ -16,7 +16,7 @@ TARGET_SEND_HZ = 10.0
 # Device configuration
 DEVICE_CHASSIS = "cDAQ9189-2462EFD"  # Actual device name from NI MAX
 # Temporarily disable LC card to troubleshoot lag
-ACTIVE_DEVICES = ["pt_card"]  # List of active device modules
+ACTIVE_DEVICES = ["pt_card", "lc_card"]  # List of active device modules
 
 # Per-device slot overrides (fallback if autodetect fails)
 PT_MODULE_SLOT = 2

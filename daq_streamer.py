@@ -83,9 +83,10 @@ class DAQStreamer:
         self._last_lc_row_lbf: List[Any] = [''] * 4
         self._last_lc_row_vv: List[Any] = [''] * 4
 
-        # Disable cross-device hardware sync by default; prefer host-paced reads
-        # across independent device tasks. Set to True only if explicit sync is required
-        # and routing is known to be available on the chassis.
+        # Disable hardware sync: NI-9237 (simultaneous delta-sigma) and NI-9208 (multiplexed scanning)
+        # use incompatible ADC architectures that cannot share sample clocks directly.
+        # Per NI literature: these must run as independent tasks with their own timebases.
+        # Synchronization is achieved through host-side timestamping at 100 Hz.
         self.hw_sync_enabled: bool = False
 
         # Only send merged frames to Node by default; per-device frames are optional
@@ -96,6 +97,15 @@ class DAQStreamer:
 
         # Logging status file for UI/Node to read
         self.status_file = Path(__file__).parent / 'logging_status.json'
+        
+        # Performance monitoring (from debug script lessons)
+        self._last_sample_values: Dict[str, List[float]] = {}  # Track last values per device
+        self._stale_count: int = 0  # Count of stale reads
+        self._total_reads: int = 0  # Total reads for validation
+        self._read_latencies: List[float] = []  # Track read latencies
+        self._max_latency_history: int = 1000  # Keep last N latencies
+        self._task_restart_count: Dict[str, int] = {}  # Track restarts per device
+        self._last_restart_time: Dict[str, float] = {}  # Track restart timing
 
         # Persistent TCP socket for Node communication
         self._node_socket: socket.socket | None = None
@@ -206,6 +216,15 @@ class DAQStreamer:
                 except Exception:
                     # Fallback to device's own timing if external route fails
                     lc_dev.configure_timing(lc_task)
+                
+                # Perform bridge offset nulling calibration on LC before starting
+                # Per NI literature: removes initial zero offset using internal DAC
+                if hasattr(lc_dev, 'perform_bridge_offset_nulling') and not lc_dev.offset_nulled:
+                    try:
+                        lc_dev.perform_bridge_offset_nulling(lc_task)
+                    except Exception as e:
+                        logger.warning(f"Bridge offset nulling skipped: {e}")
+                
                 # Configure start trigger for slave
                 try:
                     lc_task.triggers.start_trigger.cfg_dig_edge_start_trig(trig_src)
@@ -347,11 +366,27 @@ class DAQStreamer:
             pass
 
         per_device_read_count = {id(d): 0 for d, _ in self._device_tasks}
+        
+        # Performance monitoring
+        last_perf_report = time.time()
+        perf_report_interval = 60.0  # Report every 60 seconds
 
         target_period_s = self.loop_period_s
         while self.running:
             loop_t0 = time.time()
             self._loop_index += 1
+            
+            # Periodic performance report (from debug script lessons)
+            if time.time() - last_perf_report >= perf_report_interval:
+                if self._read_latencies:
+                    avg_latency = sum(self._read_latencies) / len(self._read_latencies)
+                    max_latency = max(self._read_latencies)
+                    stale_pct = (self._stale_count / max(1, self._total_reads)) * 100
+                    logger.info(
+                        f"Performance: avg_latency={avg_latency*1000:.2f}ms, max_latency={max_latency*1000:.2f}ms, "
+                        f"stale={self._stale_count}/{self._total_reads} ({stale_pct:.1f}%), loop_rate={self.sample_clock_hz}Hz"
+                    )
+                last_perf_report = time.time()
             # Handle start/stop logging requests from Node via command files
             try:
                 if self.start_log_cmd.exists() and not self.logging_enabled:
@@ -548,11 +583,21 @@ class DAQStreamer:
                             task.in_stream.offset = -read_count
                         except Exception:
                             pass
+                        
+                        # Measure read latency (from debug script lessons)
+                        read_t0 = time.time()
                         try:
                             raw_data = task.read(
                                 number_of_samples_per_channel=read_count,
                                 timeout=self.read_timeout_s,
                             )
+                            read_latency = time.time() - read_t0
+                            self._read_latencies.append(read_latency)
+                            if len(self._read_latencies) > self._max_latency_history:
+                                self._read_latencies.pop(0)
+                            # Alert on high latency (>100 ms for 100 Hz system)
+                            if read_latency > 0.100:
+                                logger.warning(f"High read latency: {read_latency*1000:.1f} ms for {dev_key}")
                         except Exception as e:
                             msg = str(e)
                             if ('-200277' in msg) or ('Invalid combination of position and offset' in msg):
@@ -567,24 +612,63 @@ class DAQStreamer:
                                     timeout=self.read_timeout_s,
                                 )
                             elif ('-200279' in msg) or ('keep up with the hardware' in msg):
-                                logger.warning(f"DAQ overrun on {device.device_info['device_type']} ({device.module_name}); restarting task")
-                                if self._restart_device_task(device):
-                                    continue
+                                # Buffer overrun: clear buffer and continue (don't restart task)
+                                logger.warning(f"DAQ overrun on {device.device_info['device_type']} ({device.module_name}); clearing buffer")
                                 try:
-                                    task.in_stream.read_relative_to = nidaqmx.constants.ReadRelativeTo.CURRENT_READ_POSITION
-                                    task.in_stream.offset = 0
-                                except Exception:
-                                    pass
-                                try:
-                                    raw_data = task.read(
-                                        number_of_samples_per_channel=1,
-                                        timeout=self.read_timeout_s,
-                                    )
-                                except Exception:
+                                    # Read and discard all available samples to clear buffer
+                                    # Note: read_relative_to is on task.in_stream, not InStream directly
+                                    avail = task.in_stream.avail_samp_per_chan
+                                    if avail > 0:
+                                        raw_data = task.read(
+                                            number_of_samples_per_channel=avail,
+                                            timeout=self.read_timeout_s,
+                                        )
+                                        logger.info(f"Cleared {avail} buffered samples from {dev_key}")
+                                        # Reset miss counter on successful clear
+                                        self._device_miss[id(device)] = 0
+                                    else:
+                                        # No samples to clear, just continue
+                                        raw_data = task.read(
+                                            number_of_samples_per_channel=1,
+                                            timeout=self.read_timeout_s,
+                                        )
+                                except Exception as clear_err:
+                                    logger.error(f"Failed to clear buffer: {clear_err}")
+                                    # Only restart if clearing buffer fails repeatedly
+                                    dev_id = id(device)
+                                    if dev_id not in self._device_miss:
+                                        self._device_miss[dev_id] = 0
+                                    self._device_miss[dev_id] += 1
+                                    if self._device_miss[dev_id] > 5:
+                                        logger.error(f"Repeated buffer clear failures; restarting task")
+                                        if self._restart_device_task(device):
+                                            continue
                                     continue
                             else:
                                 raise
 
+                        # Stale data detection (from debug script lessons)
+                        self._total_reads += 1
+                        if isinstance(raw_data, list) and raw_data and len(raw_data) > 0:
+                            # Check if all values in this read match the last read (indicating stale data)
+                            if dev_key and dev_key in self._last_sample_values:
+                                last_values = self._last_sample_values[dev_key]
+                                current_values = [raw_data[i][0] if isinstance(raw_data[i], list) and raw_data[i] else 0.0 
+                                                  for i in range(min(len(raw_data), len(last_values)))]
+                                if len(current_values) == len(last_values) and all(
+                                    abs(current_values[i] - last_values[i]) < 1e-12 for i in range(len(current_values))
+                                ):
+                                    self._stale_count += 1
+                                    if self._stale_count % 10 == 1:  # Log first and every 10th
+                                        logger.warning(f"Stale data detected on {dev_key} ({self._stale_count}/{self._total_reads} reads)")
+                            
+                            # Update last values for next comparison
+                            if dev_key:
+                                self._last_sample_values[dev_key] = [
+                                    raw_data[i][0] if isinstance(raw_data[i], list) and raw_data[i] else 0.0 
+                                    for i in range(len(raw_data))
+                                ]
+                        
                         # Debug summaries occasionally
                         per_device_read_count[id(device)] += 1
                         if DEBUG_ENABLE and isinstance(raw_data, list) and raw_data:
@@ -760,6 +844,24 @@ class DAQStreamer:
                 merged['channels'].extend(self._last_pt_channels)
             if isinstance(self._last_lc_channels, list):
                 merged['channels'].extend(self._last_lc_channels)
+            
+            # Add performance monitoring stats to merged frame
+            if self._read_latencies:
+                avg_latency = sum(self._read_latencies) / len(self._read_latencies)
+                max_latency = max(self._read_latencies)
+                stale_pct = (self._stale_count / max(1, self._total_reads)) * 100
+                total_restarts = sum(self._task_restart_count.values())
+                merged['performance'] = {
+                    'avg_latency_ms': round(avg_latency * 1000, 2),
+                    'max_latency_ms': round(max_latency * 1000, 2),
+                    'stale_reads': self._stale_count,
+                    'total_reads': self._total_reads,
+                    'stale_percentage': round(stale_pct, 2),
+                    'sample_rate_hz': self.sample_clock_hz,
+                    'loop_index': self._loop_index,
+                    'task_restarts': total_restarts,
+                    'restart_counts': dict(self._task_restart_count)
+                }
 
             try:
                 self.send_to_node_sync(merged)
@@ -892,7 +994,35 @@ class DAQStreamer:
             self.read_timeout_s = 0.50
 
     def _restart_device_task(self, device: Any) -> bool:
-        """Attempt to restart the NI-DAQmx task for a specific device."""
+        """Attempt to restart the NI-DAQmx task for a specific device.
+        
+        Track restart frequency to detect chronic issues.
+        """
+        dev_key = self._device_key(device)
+        dev_name = f"{device.device_info.get('device_type', 'Unknown')} ({device.module_name})"
+        
+        # Track restart frequency
+        now = time.time()
+        if dev_key not in self._task_restart_count:
+            self._task_restart_count[dev_key] = 0
+        self._task_restart_count[dev_key] += 1
+        
+        # Check if restarts are too frequent (more than 5 in last 60 seconds)
+        if dev_key in self._last_restart_time:
+            elapsed = now - self._last_restart_time[dev_key]
+            if elapsed < 60.0 and self._task_restart_count[dev_key] >= 5:
+                logger.error(
+                    f"CRITICAL: {dev_name} restarting too frequently "
+                    f"({self._task_restart_count[dev_key]} times in {elapsed:.1f}s). "
+                    f"This indicates a fundamental timing/configuration issue."
+                )
+        
+        # Reset counter if it's been more than 60 seconds
+        if dev_key in self._last_restart_time and (now - self._last_restart_time[dev_key]) > 60.0:
+            self._task_restart_count[dev_key] = 1
+        
+        self._last_restart_time[dev_key] = now
+        
         for i, (d, task) in enumerate(list(self._device_tasks)):
             if d is not device:
                 continue
@@ -905,16 +1035,26 @@ class DAQStreamer:
                     task.close()
                 except Exception:
                     pass
+                
+                # Add backoff delay for frequent restarts
+                if self._task_restart_count.get(dev_key, 0) > 3:
+                    backoff = min(2.0, 0.5 * self._task_restart_count[dev_key])
+                    logger.warning(f"Adding {backoff:.1f}s backoff before restart")
+                    time.sleep(backoff)
+                
                 new_task = nidaqmx.Task()
                 device.configure_channels(new_task)
                 device.configure_timing(new_task)
                 new_task.start()
                 self._device_tasks[i] = (device, new_task)
                 self._device_miss[id(device)] = 0
-                logger.info(f"Restarted NI task for {device.device_info['device_type']} ({device.module_name})")
+                logger.info(
+                    f"Restarted NI task for {dev_name} "
+                    f"(restart #{self._task_restart_count.get(dev_key, 0)} in last 60s)"
+                )
                 return True
             except Exception as restart_error:
-                logger.error(f"Failed to restart task for {device.device_info['device_type']}: {restart_error}")
+                logger.error(f"Failed to restart task for {dev_name}: {restart_error}")
                 return False
         return False
 
