@@ -3,15 +3,15 @@
         {
             "lc": {
                 "id": 1,
-                "name": "THRUST LOAD CELL",
+                "name": "no",
                 "short_name": "thrust",
                 "units": "lbf",
-                "range": [0, 2000],
-                "warning_high": 1800,
-                "critical_high": 1950,
+                "range": [-100, 100],
+                "warning_high": 80,
+                "critical_high": 95,
                 "calibration": {
-                    "slope": 29128.0,
-                    "offset": 0.0,
+                    "slope": 59447.0,
+                    "offset": -2.91,
                     "tare_offset": 0.0
                 }
             }
@@ -19,15 +19,15 @@
         {
             "lc": {
                 "id": 2,
-                "name": "LOX TANK WEIGHT",
+                "name": "no",
                 "short_name": "wt_lox",
                 "units": "lbf",
-                "range": [0, 500],
-                "warning_low": 50,
-                "critical_low": 20,
+                "range": [-100, 100],
+                "warning_high": 80,
+                "critical_high": 95,
                 "calibration": {
-                    "slope": 5974.9,
-                    "offset": 0.0,
+                    "slope": 59447.0,
+                    "offset": -2.91,
                     "tare_offset": 0.0
                 }
             }
@@ -42,16 +42,16 @@
                 "warning_low": 30,
                 "critical_low": 10,
                 "calibration": {
-                    "slope": 5974.9,
-                    "offset": 0.0,
-                    "tare_offset": 0.0
+                    "slope": 59447.9,
+                    "offset": -2.91,
+                    "tare_offset": 113
                 }
             }
         },
         {
             "lc": {
                 "id": 4,
-                "name": "WATERFLOW TEST STAND",
+                "name": "LOX TANK WEIGHT",
                 "short_name": "lc_vert",
                 "units": "lbf",
                 "range": [-100, 100],
@@ -60,7 +60,7 @@
                 "calibration": {
                     "slope": 59447.0,
                     "offset": -2.91,
-                    "tare_offset": 0.0
+                    "tare_offset": 129
                 }
             }
         },

@@ -16,14 +16,28 @@ if %errorlevel% equ 0 (
     echo ✓ No Node.js processes running
 )
 
-REM Kill Python processes (DAQ Streamer)
+REM Signal Python DAQ Streamer to shutdown cleanly
+echo Signaling Python DAQ Streamer to shutdown...
+powershell -Command "Set-Content -Path 'shutdown_daq.cmd' -Value 'shutdown'" 2>nul
+if exist shutdown_daq.cmd (
+    echo ✓ Shutdown signal sent
+    timeout /t 2 /nobreak >nul
+) else (
+    echo ! Failed to create shutdown signal
+)
+
+REM Kill Python processes (DAQ Streamer) - more specific
 echo Stopping Python DAQ Streamer...
-taskkill /f /im python.exe >nul 2>&1
+taskkill /f /fi "IMAGENAME eq python.exe" /fi "WINDOWTITLE eq DAQ Python Streamer*" >nul 2>&1
+taskkill /f /im python3.13.exe >nul 2>&1
 if %errorlevel% equ 0 (
     echo ✓ Python DAQ Streamer stopped
 ) else (
     echo ✓ No Python processes running
 )
+
+REM Clean up shutdown command file
+if exist shutdown_daq.cmd del shutdown_daq.cmd
 
 REM Kill any cmd windows that might be running our services
 echo Cleaning up service windows...

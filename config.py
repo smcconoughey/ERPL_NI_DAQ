@@ -10,10 +10,13 @@ DEBUG_RAW_SUMMARY = True       # Log per-read summaries (min/max/avg per channel
 DEBUG_RAW_SAMPLES = False      # Log a few raw samples per channel periodically
 DEBUG_SAMPLE_EVERY_N = 50      # How often to log raw samples (reads)
 
+# Target UI/WebSocket send rate (Hz)
+TARGET_SEND_HZ = 10.0
+
 # Device configuration
 DEVICE_CHASSIS = "cDAQ9189-2462EFD"  # Actual device name from NI MAX
-# Enable both PT and LC cards so both stream in the UI
-ACTIVE_DEVICES = ["pt_card", "lc_card"]  # List of active device modules
+# Temporarily disable LC card to troubleshoot lag
+ACTIVE_DEVICES = ["pt_card"]  # List of active device modules
 
 # Per-device slot overrides (fallback if autodetect fails)
 PT_MODULE_SLOT = 2

@@ -4,8 +4,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>NI DAQ Telemetry</title>
     <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <style>
         * {
@@ -292,6 +297,20 @@
             font-family: monospace;
         }
 
+        .sparkline {
+            width: 100%;
+            height: 36px;
+            margin-top: 6px;
+            max-width: 100%;
+            display: block;
+        }
+        /* ensure crisp canvas on HDPI */
+        canvas.sparkline { 
+            image-rendering: pixelated;
+            max-width: 100% !important;
+            height: 36px !important;
+        }
+
         @keyframes pulse {
             0% { opacity: 1; }
             50% { opacity: 0.6; }
@@ -427,6 +446,7 @@
                 <div class="telemetry-value">--</div>
                 <div class="telemetry-units">${units}</div>
                 <div class="telemetry-details"></div>
+                <canvas class="sparkline" width="300" height="36"></canvas>
             `;
             return div;
         }
@@ -466,12 +486,13 @@
                     element.classList.add('unconfigured');
                 } else {
                     const psi = ch.pressure_psi !== undefined ? ch.pressure_psi : 0;
-                    valueEl.textContent = psi.toFixed(2);
+                    valueEl.textContent = psi.toFixed(3);
+                    pushSpark('pt', idx, psi);
                 }
 
                 // Raw current if provided
                 if (ch.current_ma !== undefined) {
-                    details.textContent = `${ch.current_ma.toFixed(2)} mA`;
+                    details.textContent = `${ch.current_ma.toFixed(3)} mA`;
                 }
             });
         }
@@ -479,7 +500,9 @@
         function updateLCData(channels) {
             if (!channels || !Array.isArray(channels)) return;
 
-            channels.forEach((ch, idx) => {
+            channels.forEach((ch, arrayIdx) => {
+                if (!ch) return;
+                const idx = (typeof ch.channel === 'number') ? ch.channel : arrayIdx;
                 const element = document.getElementById(`lc-${idx}`);
                 if (!element) return;
 
@@ -495,10 +518,13 @@
                 // Display lbf value
                 const lbf = ch.lbf !== undefined ? ch.lbf : 0;
                 valueEl.textContent = lbf.toFixed(3);
+                pushSpark('lc', idx, lbf);
 
-                // Raw V/V if provided
-                if (ch.v_per_v !== undefined) {
-                    details.textContent = `${ch.v_per_v.toFixed(6)} V/V`;
+                // Raw V/V if provided - always show if available
+                if (ch.v_per_v !== undefined && ch.v_per_v !== null) {
+                    details.textContent = `${Number(ch.v_per_v).toFixed(6)} V/V`;
+                } else {
+                    details.textContent = '-- V/V';
                 }
             });
         }
@@ -713,7 +739,40 @@
                 try {
                     const msg = JSON.parse(event.data);
                     
-                    if (msg.type === 'data' && msg.data) {
+                    if (msg.type === 'batch' && msg.data) {
+                        // Efficient batch: ts_unix_us, dt_us, channels[], data{key:[...]}
+                        const d = msg.data;
+                        const chs = Array.isArray(d.channels) ? d.channels : [];
+                        // Push samples into sparklines and collect latest values
+                        const ptLatest = new Array(16).fill(undefined);
+                        const lcLatest = new Array(4).fill(undefined);
+                        chs.forEach((key)=>{
+                            const series = d.data && d.data[key];
+                            if (!Array.isArray(series) || series.length===0) return;
+                            // Map key back to card index
+                            let type='pt', idx=0;
+                            const mPT = key.match(/^PT(\d+)_psi$/); const mLC = key.match(/^LC(\d+)_lbf$/);
+                            if (mPT){ type='pt'; idx=Number(mPT[1]); }
+                            else if (mLC){ type='lc'; idx=Number(mLC[1]); }
+                            // Push all samples with inferred timestamps from batch timing
+                            const baseMs = (typeof d.ts_unix_us === 'number') ? d.ts_unix_us/1000 : performance.now();
+                            const dtMs = (typeof d.dt_us === 'number') ? Math.max(1, d.dt_us/1000) : 10;
+                            for (let i=0;i<series.length;i++){
+                                const t = baseMs + i*dtMs;
+                                pushSpark(type, idx, Number(series[i]), t);
+                            }
+                            const lastVal = Number(series[series.length-1]);
+                            if (type==='pt' && idx>=0 && idx<ptLatest.length) ptLatest[idx] = { channel: idx, pressure_psi: lastVal };
+                            if (type==='lc' && idx>=0 && idx<lcLatest.length) lcLatest[idx] = { channel: idx, lbf: lastVal };
+                        });
+                        // Update tile values from latest batch samples
+                        if (ptLatest.some(v=>v!==undefined)) updatePTData(ptLatest);
+                        if (lcLatest.some(v=>v!==undefined)) updateLCData(lcLatest);
+                        messageCount++;
+                        document.getElementById('message-count').textContent = `${messageCount} messages`;
+                        updateTimestamp();
+                        updateUpdateRate();
+                    } else if (msg.type === 'data' && msg.data) {
                         messageCount++;
                         document.getElementById('message-count').textContent = `${messageCount} messages`;
                         
@@ -722,6 +781,9 @@
                             const lc = msg.data.channels.filter(ch => ('lbf' in ch) || ('v_per_v' in ch));
                             if (pt.length) updatePTData(pt);
                             if (lc.length) updateLCData(lc);
+                            // Also push latest values into rings for charts
+                            pt.forEach((ch, idx)=>{ if (typeof ch.pressure_psi==='number') pushSpark('pt', ch.channel||idx, ch.pressure_psi); });
+                            lc.forEach((ch, idx)=>{ if (typeof ch.lbf==='number') pushSpark('lc', ch.channel||idx, ch.lbf); });
                         }
                         
                         updateTimestamp();
@@ -808,14 +870,117 @@
             document.getElementById('status-info').textContent = info;
         }
 
-        // Legacy handlers removed (no abort/estop on NI DAQ UI)
+        // Sparkline charts (Chart.js) ---------------------------------
+        const SPARK_WINDOW_MS = 30000; // 30 seconds
+        const charts = { pt: [], lc: [] };
+        const chartUpdateQueue = new Set();
+
+        function resolveTimestamp(epochMs){
+            if (typeof epochMs === 'number') {
+                return epochMs;
+            }
+            return Date.now();
+        }
+
+        function ensureChart(type, idx){
+            if (charts[type][idx]) return charts[type][idx];
+            const container = document.getElementById(`${type}-${idx}`);
+            if (!container) return null;
+            const canvas = container.querySelector('.sparkline');
+            if (!canvas) return null;
+
+            const ctx = canvas.getContext('2d');
+            const chart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    datasets: [{
+                        data: [],
+                        borderColor: type === 'pt' ? '#3182ce' : '#805ad5',
+                        borderWidth: 1,
+                        pointRadius: 0,
+                        fill: false,
+                        tension: 0,
+                        spanGaps: true
+                    }]
+                },
+                options: {
+                    responsive: false,
+                    maintainAspectRatio: false,
+                    animation: false,
+                    layout: {
+                        padding: { left: 2, right: 2, top: 2, bottom: 2 }
+                    },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: { enabled: false }
+                    },
+                    scales: {
+                        x: {
+                            type: 'time',
+                            adapters: {
+                                date: {
+                                    locale: undefined
+                                }
+                            },
+                            time: {
+                                unit: 'second',
+                                displayFormats: { second: 'mm:ss' }
+                            },
+                            grid: { display: false },
+                            ticks: { display: false }
+                        },
+                        y: {
+                            grid: { display: false },
+                            ticks: { display: false }
+                        }
+                    },
+                    elements: {
+                        line: { borderJoinStyle: 'round' }
+                    }
+                }
+            });
+            charts[type][idx] = chart;
+            return chart;
+        }
+
+        function pushSpark(type, idx, value, epochMs){
+            const chart = ensureChart(type, idx);
+            if (!chart) return;
+
+            const data = chart.data.datasets[0].data;
+            const t = resolveTimestamp(epochMs);
+            data.push({ x: t, y: Number(value) });
+
+            const cutoff = Date.now() - SPARK_WINDOW_MS;
+            while (data.length && data[0].x < cutoff) {
+                data.shift();
+            }
+
+            chartUpdateQueue.add(chart);
+        }
+
+        function startChartRenderLoop(){
+            const render = () => {
+                if (chartUpdateQueue.size > 0) {
+                    const now = Date.now();
+                    chartUpdateQueue.forEach(chart => {
+                        chart.options.scales.x.min = now - SPARK_WINDOW_MS;
+                        chart.options.scales.x.max = now;
+                        chart.update('none');
+                    });
+                    chartUpdateQueue.clear();
+                }
+                requestAnimationFrame(render);
+            };
+            requestAnimationFrame(render);
+        }
 
         // Initialize on load
         document.addEventListener('DOMContentLoaded', () => {
             initTelemetry();
             initWebSocket();
             updateStatusBar('Connecting to server...');
-            
+            startChartRenderLoop();
             // Poll logging status every 2 seconds
             setInterval(pollLoggingStatus, 2000);
         });

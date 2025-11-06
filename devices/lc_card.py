@@ -24,8 +24,8 @@ class LCCard(BaseDevice):
         # NI-9237 has 4 bridge input channels
         self.channel_count = 4
         # Robust cadence: 100 Hz device sample rate, app updates ~10 Hz
-        self.sample_rate = 100
-        self.samples_per_channel = 10
+        self.sample_rate = 10
+        self.samples_per_channel = 1
 
         # Attempt to autodetect the NI-9237 module on the chassis
         try:
@@ -221,6 +221,7 @@ class LCCard(BaseDevice):
                 'units': 'lbf'
             })
 
+            # Build per-sample records for CSV logging
             for sample_idx, sample_val in enumerate(samples):
                 while len(per_sample_records) <= sample_idx:
                     per_sample_records.append([])

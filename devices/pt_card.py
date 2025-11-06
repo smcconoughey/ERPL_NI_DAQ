@@ -35,9 +35,9 @@ class PTCard(BaseDevice):
             # If autodetection fails, keep the provided module slot
             pass
         self.channel_count = 16
-        # Robust cadence: 100 Hz device sample rate, app updates ~10 Hz
-        self.sample_rate = 100
-        self.samples_per_channel = 10
+        # 200 Hz device sample rate
+        self.sample_rate = 20
+        self.samples_per_channel = 1
         # Per-channel tare offset in PSI
         self.tare_offsets: Dict[int, float] = {}
         self.tared = False
@@ -106,15 +106,29 @@ class PTCard(BaseDevice):
         )
     
     def configure_timing(self, task: nidaqmx.Task) -> None:
-        # Continuous sampling; allocate a larger buffer and read windows per tick
         task.timing.cfg_samp_clk_timing(
             rate=self.sample_rate,
             sample_mode=AcquisitionType.CONTINUOUS,
-            samps_per_chan=self.sample_rate * 5  # 5 seconds onboard buffer
+            samps_per_chan=self.sample_rate * 10 # 10 seconds onboard buffer
         )
         try:
-            # Increase host-side input buffer to tolerate brief stalls
-            task.in_stream.input_buf_size = int(self.sample_rate * 20)  # 20 seconds host buffer
+            task.in_stream.input_buf_size = int(self.sample_rate * 40) # 40 seconds host buffer
+        except Exception:
+            pass
+        # Prefer non-blocking reads of the latest chunk
+        try:
+            task.in_stream.over_write = nidaqmx.constants.OverwriteMode.OVERWRITE_OLDEST
+            task.in_stream.read_relative_to = nidaqmx.constants.ReadRelativeTo.MOST_RECENT_SAMPLE
+            task.in_stream.offset = -self.samples_per_channel
+        except Exception:
+            pass
+        # Force high-speed conversion mode on every channel if available
+        try:
+            task.ai_channels.all.ai_adc_timing_mode = nidaqmx.constants.ADCTimingMode.HIGH_SPEED
+        except Exception:
+            pass
+        try:
+            task.ai_channels.all.ai_digital_filter_enable = False
         except Exception:
             pass
     
@@ -164,9 +178,9 @@ class PTCard(BaseDevice):
             if not isinstance(channel_data, list) or not channel_data:
                 continue
 
-            # Average the samples for better noise reduction
-            avg_current = sum(channel_data) / len(channel_data)
-            current_ma = avg_current * 1000
+            # Use most recent sample for responsive UI updates
+            latest_current = channel_data[-1]
+            current_ma = latest_current * 1000
             status = 'ok'
             if current_ma < 3.0 or current_ma > 25.0:
                 status = 'disconnected'
@@ -182,9 +196,9 @@ class PTCard(BaseDevice):
                 'name': sensor_info['name'],
                 'id': sensor_info['id'],
                 'group': sensor_info['group'],
-                'current_ma': round(current_ma, 2),
+                'current_ma': round(current_ma, 3),
                 'status': status,
-                'pressure_psi': round(psi, 2),
+                'pressure_psi': round(psi, 3),
                 'units': 'psi'
             })
 
@@ -204,8 +218,8 @@ class PTCard(BaseDevice):
 
                 per_sample_records[sample_idx].append({
                     'channel': channel_idx,
-                    'current_ma': round(sample_ma, 2),
-                    'pressure_psi': round(sample_psi, 2),
+                    'current_ma': round(sample_ma, 3),
+                    'pressure_psi': round(sample_psi, 3),
                     'status': sample_status,
                 })
 

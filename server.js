@@ -13,6 +13,7 @@ const WEB_PORT = 3000;
 const TCP_PORT = 5001;  // Updated to avoid port conflicts
 const MAX_CLIENTS = 100;
 const HEARTBEAT_INTERVAL = 30000;
+const BATCH_INTERVAL_MS = 100;
 
 class DAQWebSocketServer {
     constructor() {
@@ -28,6 +29,9 @@ class DAQWebSocketServer {
         this.lastPT = null;                // last PT-only frame
         this.lastLC = null;                // last LC-only frame
         this.messageCount = 0;
+        // Batch state for compact transport to UI
+        this.batch = { startTsUs: 0, dtUs: 10000, data: Object.create(null), channels: new Set(), count: 0 };
+        this.lastSampleTsUs = 0;
         
         // CSV logging
         this.loggingEnabled = false;
@@ -42,6 +46,7 @@ class DAQWebSocketServer {
         this.setupWebSocket();
         this.setupTCPServer();
         this.setupHeartbeat();
+        this.setupBatchFlush();
     }
     
     setupExpress() {
@@ -156,15 +161,10 @@ class DAQWebSocketServer {
                         const src = (parsedData && parsedData.source) ? String(parsedData.source) : '';
 
                         if (/Merged/i.test(src)) {
-                            // Accept fully merged frame from Python directly
+                            // Accept fully merged frame and ingest into batch
                             this.lastMessage = parsedData;
                             this.messageCount++;
-                            this.broadcast({
-                                type: 'data',
-                                data: parsedData,
-                                timestamp: new Date().toISOString(),
-                                raw: parsedData && parsedData.raw ? parsedData.raw : undefined
-                            });
+                            this.ingestMerged(parsedData);
                         } else {
                             // Merge PT and LC frames so UI gets unified payload
                             if (parsedData && parsedData.channels && parsedData.channels.length) {
@@ -185,13 +185,7 @@ class DAQWebSocketServer {
                             }
                             this.lastMessage = merged;
                             this.messageCount++;
-
-                            this.broadcast({
-                                type: 'data',
-                                data: merged,
-                                timestamp: new Date().toISOString(),
-                                raw: parsedData && parsedData.raw ? parsedData.raw : undefined
-                            });
+                            this.ingestMerged(merged);
                         }
                     });
                     
@@ -287,6 +281,53 @@ class DAQWebSocketServer {
                 this.clients.delete(ws);
             }
         });
+    }
+
+    // Ingest a merged frame into batching structures
+    ingestMerged(merged){
+        try{
+            const nowUs = (typeof merged.timestamp === 'number') ? Math.floor(merged.timestamp*1e6) : Math.floor(Date.now()*1000);
+            if (this.batch.count === 0){
+                this.batch.startTsUs = nowUs;
+                // Try to estimate dt from previous sample; default 10ms
+                const dt = (this.lastSampleTsUs>0) ? Math.max(1000, Math.min(50000, nowUs - this.lastSampleTsUs)) : 10000;
+                this.batch.dtUs = dt;
+            }
+            this.lastSampleTsUs = nowUs;
+            const chs = merged.channels || [];
+            for (const ch of chs){
+                // Derive a compact channel key
+                let key = null;
+                if (typeof ch.channel === 'number' && ch.pressure_psi !== undefined) key = `PT${ch.channel}_psi`;
+                else if (typeof ch.channel === 'number' && ch.lbf !== undefined) key = `LC${ch.channel}_lbf`;
+                else if (ch.name) key = ch.name.replace(/\s+/g,'_');
+                if (!key) continue;
+                this.batch.channels.add(key);
+                if (!this.batch.data[key]) this.batch.data[key] = [];
+                if (ch.pressure_psi !== undefined) this.batch.data[key].push(Number(ch.pressure_psi));
+                else if (ch.lbf !== undefined) this.batch.data[key].push(Number(ch.lbf));
+            }
+            this.batch.count++;
+        }catch(e){/* ignore */}
+    }
+
+    setupBatchFlush(){
+        setInterval(()=>{
+            try{
+                if (this.batch.count === 0) return;
+                const payload = {
+                    ts_unix_us: this.batch.startTsUs,
+                    dt_us: this.batch.dtUs,
+                    channels: Array.from(this.batch.channels),
+                    data: this.batch.data
+                };
+                this.broadcast({ type: 'batch', data: payload, timestamp: new Date().toISOString()});
+            }catch(e){ console.error('Batch flush error', e); }
+            finally{
+                // reset batch
+                this.batch = { startTsUs: 0, dtUs: this.batch.dtUs, data: Object.create(null), channels: new Set(), count: 0 };
+            }
+        }, BATCH_INTERVAL_MS);
     }
     
     start() {

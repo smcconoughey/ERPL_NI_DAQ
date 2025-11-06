@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+logs/
+logging_status_lc.json
+logging_status.json
+startup.log
+*.log
+
