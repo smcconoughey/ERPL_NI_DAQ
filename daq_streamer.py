@@ -576,19 +576,28 @@ class DAQStreamer:
                 for device, task in list(self._device_tasks):
                     try:
                         dev_key = self._device_key(device)
-                        read_count = max(1, int(self.samples_per_read))
-                        # Always read the most recent fixed-size window
-                        try:
-                            task.in_stream.read_relative_to = nidaqmx.constants.ReadRelativeTo.MOST_RECENT_SAMPLE
-                            task.in_stream.offset = -read_count
-                        except Exception:
-                            pass
+
+                        default_chunk = max(1, int(self.samples_per_read))
+                        device_chunk = int(getattr(device, 'samples_per_channel', default_chunk))
+                        use_read_all = bool(getattr(device, 'read_all_available', False))
+
+                        if use_read_all:
+                            read_param = nidaqmx.constants.READ_ALL_AVAILABLE
+                        else:
+                            read_count = max(1, device_chunk)
+                            read_param = read_count
+                            # Always read the most recent fixed-size window
+                            try:
+                                task.in_stream.read_relative_to = nidaqmx.constants.ReadRelativeTo.MOST_RECENT_SAMPLE
+                                task.in_stream.offset = -read_count
+                            except Exception:
+                                pass
                         
                         # Measure read latency (from debug script lessons)
                         read_t0 = time.time()
                         try:
                             raw_data = task.read(
-                                number_of_samples_per_channel=read_count,
+                                number_of_samples_per_channel=read_param,
                                 timeout=self.read_timeout_s,
                             )
                             read_latency = time.time() - read_t0

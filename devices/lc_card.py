@@ -23,12 +23,15 @@ class LCCard(BaseDevice):
         self.product_type = "Unknown"
         # NI-9237 has 4 bridge input channels
         self.channel_count = 4
-        # CRITICAL: 10 Hz rate prevents chronic buffer overruns
-        # NI-9237 simultaneous delta-sigma ADCs produce data faster than host can poll
-        # in this architecture. Testing confirms 10 Hz is stable without overruns.
-        # For higher rates, would need DMA transfer or hardware-timed buffering strategy.
-        self.sample_rate = 10.0
-        self.samples_per_channel = 1  # Single sample per read to minimize latency
+        # Match PT card rate for synchronized acquisition
+        # The main loop runs at 10 Hz and reads 10 samples per iteration
+        # So hardware must generate at 100 Hz to match
+        self.sample_rate = 100.0
+        self.samples_per_channel = 10  # Read 10 samples per 100ms loop iteration
+        # Host side loop target (Hz) used when we need to derive chunk sizes dynamically
+        self.target_host_read_hz = 10.0
+        # High-speed fallback: when ADC timing cannot be coerced low, switch read strategy
+        self.read_all_available = False
 
         # Attempt to autodetect the NI-9237 module on the chassis
         try:
@@ -79,29 +82,79 @@ class LCCard(BaseDevice):
     def configure_timing(self, task: nidaqmx.Task) -> None:
         """Configure hardware-timed continuous sampling.
         
-        NI-9237 uses simultaneous delta-sigma ADCs (one per channel) supporting up to 50 kS/s/ch.
-        However, host-polled architecture cannot keep up with 100 Hz continuous acquisition.
-        Running at 10 Hz for stable, overrun-free operation.
+        NI-9237 uses simultaneous delta-sigma ADCs with multiple speed modes:
+        - High-Speed: ~1612.9 Hz (default, 12800 Hz / 8)
+        - Low-Speed: Allows decimated rates like 100 Hz
         
-        CRITICAL: NI-9237 does NOT support ai_excit_sense (remote sense) property per device specs.
-        Remote sense is NOT available on this module - excitation is regulated internally.
+        CRITICAL: Must force LOW-SPEED ADC mode to achieve true 100 Hz acquisition.
+        Without this, the hardware defaults to 1612.9 Hz and causes -200279 buffer overruns.
         """
         task.timing.cfg_samp_clk_timing(
             rate=self.sample_rate,
             sample_mode=AcquisitionType.CONTINUOUS,
-            samps_per_chan=int(max(10, self.sample_rate * 2))  # 2 seconds onboard buffer
+            samps_per_chan=int(max(100, self.sample_rate * 10))  # 10 seconds onboard buffer
         )
         
-        # Verify the actual configured rate
+        # CRITICAL: Use HIGH_RESOLUTION mode to enable low sample rates
+        # NI-9237 in HIGH_SPEED mode defaults to ~1612.9 Hz (12800/8) minimum
+        # HIGH_RESOLUTION mode enables proper decimation to 100 Hz
         try:
-            actual_rate = task.timing.samp_clk_rate
-            logger.info(f"NI-9237: Configured sample rate = {self.sample_rate} Hz, actual rate = {actual_rate} Hz")
+            task.ai_channels.all.ai_adc_timing_mode = nidaqmx.constants.ADCTimingMode.HIGH_RESOLUTION
+            logger.info(f"NI-9237: Set HIGH_RESOLUTION ADC mode to enable {self.sample_rate} Hz decimation")
+        except Exception as e:
+            logger.warning(f"Could not set ADC timing mode to HIGH_RESOLUTION: {e}")
+            logger.warning("Hardware will likely coerce rate to ~1612 Hz, causing -200279 overruns")
+        
+        # Verify the actual configured rate and auto-adjust if coerced
+        coerced_high_speed = False
+        try:
+            actual_rate = float(task.timing.samp_clk_rate)
+            logger.info(f"NI-9237: Requested rate = {self.sample_rate} Hz, actual rate = {actual_rate} Hz")
+
+            if abs(actual_rate - self.sample_rate) > 1.0:
+                logger.warning(
+                    f"NI-9237: Rate coercion detected! Requested {self.sample_rate} Hz but got {actual_rate} Hz"
+                )
+
+                if actual_rate > 1000:
+                    coerced_high_speed = True
+                    self.sample_rate = actual_rate
+                    logger.warning(f"NI-9237: Hardware locked to high-speed mode (~{actual_rate:.1f} Hz)")
+                    logger.warning("ADC timing mode could not be set to HIGH_RESOLUTION")
+                    logger.warning(
+                        "CRITICAL: Host reader must drain ~1.6 kHz data stream to avoid -200279 overruns"
+                    )
+                    logger.error(
+                        "SOLUTION: Switching to READ_ALL_AVAILABLE host strategy at hardware rate"
+                    )
+                else:
+                    # Small coercion is acceptable (e.g., 100.5 Hz instead of 100 Hz)
+                    self.sample_rate = actual_rate
+                    logger.info(
+                        f"NI-9237: Accepting hardware rate of {actual_rate:.2f} Hz (close enough to target)"
+                    )
         except Exception as e:
             logger.warning(f"Could not read actual sample clock rate: {e}")
-        
+
+        if coerced_high_speed:
+            # Derive chunk size from host loop target (default 10 Hz) so we drain the buffer fast enough
+            host_hz = self.target_host_read_hz if self.target_host_read_hz > 0 else 10.0
+            # ceil to ensure we request at least the produced samples each loop iteration
+            samples_per_chunk = max(1, int(round(self.sample_rate / host_hz)))
+            self.samples_per_channel = samples_per_chunk
+            self.read_all_available = True
+            logger.info(
+                "NI-9237: Configured high-speed fallback: samples_per_channel=%d, host target=%.1f Hz",
+                self.samples_per_channel,
+                host_hz,
+            )
+        else:
+            # Maintain compatibility with existing fixed-size reads
+            self.read_all_available = False
+
         try:
-            # Conservative host buffer for 10 Hz operation
-            task.in_stream.input_buf_size = int(max(50, self.sample_rate * 10))  # 10 seconds
+            # Generous host buffer sized from the actual sample rate (30 seconds of data)
+            task.in_stream.input_buf_size = int(max(1000, self.sample_rate * 30))
         except Exception:
             pass
         

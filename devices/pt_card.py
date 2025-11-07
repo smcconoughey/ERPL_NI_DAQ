@@ -37,8 +37,8 @@ class PTCard(BaseDevice):
         self.channel_count = 16
         # Default to 100 Hz for true 100 Hz acquisition (will be hardware-timed)
         self.sample_rate = 100.0
-        # Match LC card: single-sample reads for consistent behavior
-        self.samples_per_channel = 1
+        # Main loop runs at 10 Hz, reads 10 samples per iteration
+        self.samples_per_channel = 10
         # Per-channel tare offset in PSI
         self.tare_offsets: Dict[int, float] = {}
         self.tared = False
