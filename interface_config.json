@@ -26,7 +26,7 @@
     },
     {
       "channel": 1,
-      "name": "LOX Reg Downstream",
+      "name": "wf tank downstream",
       "id": "PT2E",
       "serial": "1A043JCJI2E",
       "group": "lox",
@@ -38,7 +38,7 @@
     },
     {
       "channel": 2,
-      "name": "LOX Tank Upstream",
+      "name": "wf tank upstream",
       "id": "PT3E",
       "serial": "1A043JCC7HX",
       "group": "lox",
@@ -50,7 +50,7 @@
     },
     {
       "channel": 3,
-      "name": "LOX Tank Downstream",
+      "name": "wf manifold",
       "id": "PT4E",
       "serial": "1A043JCHMIH",
       "group": "lox",
@@ -62,7 +62,7 @@
     },
     {
       "channel": 4,
-      "name": "LOX Engine Manifold",
+      "name": "venturi inlet",
       "id": "PT5E",
       "serial": "1A043JCBSIH",
       "group": "lox",
@@ -74,12 +74,12 @@
     },
     {
       "channel": 5,
-      "name": "Fuel Reg Upstream",
+      "name": "venturi outlet",
       "id": "PT11E",
       "serial": "1A042U98Y2Q",
       "group": "fuel",
       "calibration": {
-        "max_psi": 10000.0,
+        "max_psi": 1500.0,
         "zero_ma": 4.0,
         "units": "psi"
       }

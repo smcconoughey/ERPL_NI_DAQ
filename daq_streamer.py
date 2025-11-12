@@ -13,7 +13,7 @@ import csv
 import signal
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import AsyncGenerator, Dict, Any, List, Tuple
+from typing import AsyncGenerator, Dict, Any, List, Tuple, Optional
 import nidaqmx
 from nidaqmx.constants import AcquisitionType
 from config import (
@@ -46,15 +46,19 @@ class DAQStreamer:
         
         # CSV logging
         self.logging_enabled = False
-        self.log_file = None
-        self.log_writer = None
+        self.pt_log_file = None
+        self.pt_log_writer = None
         self.log_filename = None
+        self.lc_log_file = None
+        self.lc_log_writer = None
+        self.lc_log_filename = None
         # Raw CSV logging (per-read raw samples)
         self.raw_log_file = None
         self.raw_log_writer = None
         self.raw_log_filename = None
         self.log_lock = threading.Lock()
         self.log_data_count = 0
+        self.lc_log_data_count = 0
         self.log_start_time = None
 
         # Shutdown control
@@ -73,11 +77,17 @@ class DAQStreamer:
         self._combined_slices: List[Tuple[object, slice]] = []
         self.sample_clock_hz: float = 100.0
         self.samples_per_read: int = 10
-        self._accumulated_samples: int = 0
+        self._accumulated_pt_samples: int = 0
+        self._accumulated_lc_samples: int = 0
         self.loop_period_s: float = 0.10
         self.read_timeout_s: float = 1.0
-        self._pending_log_rows: List[Dict[str, List[Any]]] = []
+        self._pending_pt_rows: List[Dict[str, Any]] = []
+        self._pending_lc_rows: List[Dict[str, Any]] = []
         self._loop_index: int = 0
+        self._next_loop_deadline: Optional[float] = None
+        self._last_loop_period: float = self.loop_period_s
+        self._loop_rate_probe_t0: Optional[float] = None
+        self._loop_rate_probe_index: Optional[int] = None
         # Watchdogs and last-knowns
         self._device_miss: Dict[int, int] = {}
         self._last_lc_row_lbf: List[Any] = [''] * 4
@@ -106,9 +116,14 @@ class DAQStreamer:
         self._max_latency_history: int = 1000  # Keep last N latencies
         self._task_restart_count: Dict[str, int] = {}  # Track restarts per device
         self._last_restart_time: Dict[str, float] = {}  # Track restart timing
+        self._pending_task_restarts: Dict[int, Dict[str, Any]] = {}
+        self._device_sample_rates: Dict[str, float] = {}
 
         # Persistent TCP socket for Node communication
         self._node_socket: socket.socket | None = None
+        self._socket_lock = threading.Lock()
+        self._reconnect_lock = threading.Lock()
+        self._reconnecting: bool = False
         
         # Tare command file
         self.tare_cmd_file = Path(__file__).parent / 'tare.cmd'  # legacy: tare all
@@ -322,6 +337,14 @@ class DAQStreamer:
                             # Device cannot be accessed; allow network chassis to settle and retry
                             time.sleep(3.0)
                             continue
+                        if ('-201401' in msg or 'Make sure the device is connected' in msg) and attempt < 2:
+                            # Network chassis not ready yet; allow additional settle time
+                            logger.warning(
+                                f"{device.device_info['device_type']} not reachable (attempt {attempt+1}); "
+                                "waiting 5s for chassis to come online"
+                            )
+                            time.sleep(5.0)
+                            continue
                         logger.error(f"Failed to start device {device.device_info['device_type']}: {e}")
                         break
                 if not started:
@@ -368,16 +391,20 @@ class DAQStreamer:
         per_device_read_count = {id(d): 0 for d, _ in self._device_tasks}
         
         # Performance monitoring
-        last_perf_report = time.time()
+        last_perf_report = time.perf_counter()
         perf_report_interval = 60.0  # Report every 60 seconds
-
-        target_period_s = self.loop_period_s
         while self.running:
-            loop_t0 = time.time()
+            loop_t0 = time.perf_counter()
             self._loop_index += 1
+            self._process_pending_restarts()
+            current_period = max(0.001, self.loop_period_s)
+            if abs(current_period - self._last_loop_period) > 1e-6:
+                self._last_loop_period = current_period
+                self._next_loop_deadline = None
             
             # Periodic performance report (from debug script lessons)
-            if time.time() - last_perf_report >= perf_report_interval:
+            now_perf = loop_t0
+            if now_perf - last_perf_report >= perf_report_interval:
                 if self._read_latencies:
                     avg_latency = sum(self._read_latencies) / len(self._read_latencies)
                     max_latency = max(self._read_latencies)
@@ -386,7 +413,7 @@ class DAQStreamer:
                         f"Performance: avg_latency={avg_latency*1000:.2f}ms, max_latency={max_latency*1000:.2f}ms, "
                         f"stale={self._stale_count}/{self._total_reads} ({stale_pct:.1f}%), loop_rate={self.sample_clock_hz}Hz"
                     )
-                last_perf_report = time.time()
+                last_perf_report = now_perf
             # Handle start/stop logging requests from Node via command files
             try:
                 if self.start_log_cmd.exists() and not self.logging_enabled:
@@ -561,6 +588,13 @@ class DAQStreamer:
                             samples = processed_data.get('samples')
                             if isinstance(samples, list):
                                 device_samples_map[device_key] = samples
+                                try:
+                                    rate = float(getattr(device, 'sample_rate', self.sample_clock_hz))
+                                except Exception:
+                                    rate = float(self.sample_clock_hz)
+                                if rate <= 0.0:
+                                    rate = float(self.sample_clock_hz) if self.sample_clock_hz > 0 else 100.0
+                                self._device_sample_rates[device_key] = rate
 
                             # Optional: send per-device frames
                             if self.send_per_device:
@@ -594,13 +628,13 @@ class DAQStreamer:
                                 pass
                         
                         # Measure read latency (from debug script lessons)
-                        read_t0 = time.time()
+                        read_t0 = time.perf_counter()
                         try:
                             raw_data = task.read(
                                 number_of_samples_per_channel=read_param,
                                 timeout=self.read_timeout_s,
                             )
-                            read_latency = time.time() - read_t0
+                            read_latency = time.perf_counter() - read_t0
                             self._read_latencies.append(read_latency)
                             if len(self._read_latencies) > self._max_latency_history:
                                 self._read_latencies.pop(0)
@@ -784,6 +818,13 @@ class DAQStreamer:
                             if isinstance(samples, list):
                                 device_samples_map[device_key] = samples
                                 try:
+                                    rate = float(getattr(device, 'sample_rate', self.sample_clock_hz))
+                                except Exception:
+                                    rate = float(self.sample_clock_hz)
+                                if rate <= 0.0:
+                                    rate = float(self.sample_clock_hz) if self.sample_clock_hz > 0 else 100.0
+                                self._device_sample_rates[device_key] = rate
+                                try:
                                     raw_snapshot = processed_data.get('raw')
                                     if isinstance(raw_snapshot, list):
                                         self.raw_snapshots[device_key] = raw_snapshot
@@ -877,18 +918,47 @@ class DAQStreamer:
             except Exception as e:
                 logger.error(f"Failed to send merged frame: {e}")
 
-            # Log merged CSV row if enabled (cap per loop to 1 write)
+            # Flush pending CSV rows if logging is enabled
             if self.logging_enabled:
                 try:
-                    self._write_merged_log_entry()
+                    self._flush_pending_logs()
                 except Exception as e:
-                    logger.error(f"Failed to write merged log entry: {e}")
+                    logger.error(f"Failed to flush log entries: {e}")
+
+            if self._loop_index % 500 == 0:
+                probe_now = time.perf_counter()
+                if self._loop_rate_probe_t0 is None or self._loop_rate_probe_index is None:
+                    self._loop_rate_probe_t0 = probe_now
+                    self._loop_rate_probe_index = self._loop_index
+                else:
+                    elapsed_probe = probe_now - self._loop_rate_probe_t0
+                    if elapsed_probe > 0:
+                        delta_loops = self._loop_index - self._loop_rate_probe_index
+                        rate = delta_loops / elapsed_probe
+                        target_rate = 1.0 / self.loop_period_s if self.loop_period_s > 0 else 0.0
+                        logger.info(f"DAQ loop running at {rate:.2f} Hz (target {target_rate:.2f})")
+                    self._loop_rate_probe_t0 = probe_now
+                    self._loop_rate_probe_index = self._loop_index
 
             # Pace loop to ~100 Hz
-            elapsed = time.time() - loop_t0
-            remaining = target_period_s - elapsed
-            if remaining > 0:
-                time.sleep(remaining)
+            period = max(0.001, self.loop_period_s)
+            now_perf = time.perf_counter()
+            if self._next_loop_deadline is None:
+                self._next_loop_deadline = now_perf + period
+            if now_perf < self._next_loop_deadline:
+                sleep_time = self._next_loop_deadline - now_perf
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                now_perf = time.perf_counter()
+            else:
+                # behind schedule; align next deadline to now
+                self._next_loop_deadline = now_perf
+
+            self._next_loop_deadline += period
+
+            # If we somehow slipped more than one full period behind, resync completely
+            if now_perf - self._next_loop_deadline > period:
+                self._next_loop_deadline = now_perf + period
 
         # Stop and clear tasks on exit
         for _, task in self._device_tasks:
@@ -968,7 +1038,7 @@ class DAQStreamer:
             task.start()
 
             self._combined_task = task
-            self._accumulated_samples = 0
+            self._accumulated_pt_samples = 0
             self._recompute_loop_timing()
             logger.info(
                 f"Combined task started @ {self.sample_clock_hz:.1f} Hz, chunk {self.samples_per_read} samples, total channels {chan_offset}"
@@ -996,11 +1066,66 @@ class DAQStreamer:
             # Ensure we do not spin faster than hardware can provide fresh data
             self.loop_period_s = max(0.001, expected_period)
             # Give generous slack for scheduling jitter
-            self.read_timeout_s = max(0.20, expected_period * 3.0)
+            self.read_timeout_s = max(0.05, expected_period * 1.25)
         else:
             # Sensible defaults if configuration is missing or invalid
             self.loop_period_s = 0.10
             self.read_timeout_s = 0.50
+
+    def _process_pending_restarts(self) -> None:
+        if not self._pending_task_restarts:
+            return
+
+        now = time.perf_counter()
+        ready_ids = [
+            dev_id for dev_id, meta in list(self._pending_task_restarts.items())
+            if now >= meta.get('ready_at', now)
+        ]
+        for dev_id in ready_ids:
+            meta = self._pending_task_restarts.get(dev_id)
+            if not meta:
+                continue
+            device = meta.get('device')
+            if device is None:
+                self._pending_task_restarts.pop(dev_id, None)
+                continue
+            index = meta.get('index')
+            dev_name = meta.get('dev_name', f"{device}")
+            restart_count = meta.get('restart_count')
+            try:
+                self._start_device_task_now(device, index, dev_name, restart_count)
+                self._pending_task_restarts.pop(dev_id, None)
+            except Exception as restart_error:
+                logger.error(f"Failed to restart task for {dev_name}: {restart_error}")
+                attempts = int(meta.get('attempts', 0)) + 1
+                meta['attempts'] = attempts
+                meta['ready_at'] = now + min(2.0, 0.5 * (attempts + 1))
+
+    def _start_device_task_now(
+        self,
+        device: Any,
+        index: Optional[int],
+        dev_name: str,
+        restart_count: Optional[int] = None,
+    ) -> None:
+        new_task = nidaqmx.Task()
+        device.configure_channels(new_task)
+        device.configure_timing(new_task)
+        new_task.start()
+
+        insertion_index = index if isinstance(index, int) else len(self._device_tasks)
+        if insertion_index < 0:
+            insertion_index = 0
+        if insertion_index >= len(self._device_tasks):
+            self._device_tasks.append((device, new_task))
+        else:
+            self._device_tasks.insert(insertion_index, (device, new_task))
+
+        self._device_miss[id(device)] = 0
+        if restart_count is not None:
+            logger.info(f"Restarted NI task for {dev_name} (restart #{restart_count})")
+        else:
+            logger.info(f"Restarted NI task for {dev_name}")
 
     def _restart_device_task(self, device: Any) -> bool:
         """Attempt to restart the NI-DAQmx task for a specific device.
@@ -1009,63 +1134,74 @@ class DAQStreamer:
         """
         dev_key = self._device_key(device)
         dev_name = f"{device.device_info.get('device_type', 'Unknown')} ({device.module_name})"
-        
-        # Track restart frequency
-        now = time.time()
-        if dev_key not in self._task_restart_count:
-            self._task_restart_count[dev_key] = 0
-        self._task_restart_count[dev_key] += 1
-        
-        # Check if restarts are too frequent (more than 5 in last 60 seconds)
-        if dev_key in self._last_restart_time:
-            elapsed = now - self._last_restart_time[dev_key]
-            if elapsed < 60.0 and self._task_restart_count[dev_key] >= 5:
+
+        now = time.perf_counter()
+        restart_count = self._task_restart_count.get(dev_key, 0) + 1
+        self._task_restart_count[dev_key] = restart_count
+
+        last_restart = self._last_restart_time.get(dev_key)
+        if last_restart is not None:
+            elapsed = now - last_restart
+            if elapsed < 60.0 and restart_count >= 5:
                 logger.error(
                     f"CRITICAL: {dev_name} restarting too frequently "
-                    f"({self._task_restart_count[dev_key]} times in {elapsed:.1f}s). "
+                    f"({restart_count} times in {elapsed:.1f}s). "
                     f"This indicates a fundamental timing/configuration issue."
                 )
-        
-        # Reset counter if it's been more than 60 seconds
-        if dev_key in self._last_restart_time and (now - self._last_restart_time[dev_key]) > 60.0:
-            self._task_restart_count[dev_key] = 1
-        
+            if elapsed > 60.0:
+                self._task_restart_count[dev_key] = 1
+                restart_count = 1
         self._last_restart_time[dev_key] = now
-        
+
+        target_index: Optional[int] = None
+        existing_task = None
         for i, (d, task) in enumerate(list(self._device_tasks)):
-            if d is not device:
-                continue
+            if d is device:
+                target_index = i
+                existing_task = task
+                break
+
+        if existing_task is None or target_index is None:
+            return False
+
+        try:
             try:
-                try:
-                    task.stop()
-                except Exception:
-                    pass
-                try:
-                    task.close()
-                except Exception:
-                    pass
-                
-                # Add backoff delay for frequent restarts
-                if self._task_restart_count.get(dev_key, 0) > 3:
-                    backoff = min(2.0, 0.5 * self._task_restart_count[dev_key])
-                    logger.warning(f"Adding {backoff:.1f}s backoff before restart")
-                    time.sleep(backoff)
-                
-                new_task = nidaqmx.Task()
-                device.configure_channels(new_task)
-                device.configure_timing(new_task)
-                new_task.start()
-                self._device_tasks[i] = (device, new_task)
-                self._device_miss[id(device)] = 0
-                logger.info(
-                    f"Restarted NI task for {dev_name} "
-                    f"(restart #{self._task_restart_count.get(dev_key, 0)} in last 60s)"
-                )
+                existing_task.stop()
+            except Exception:
+                pass
+            try:
+                existing_task.close()
+            except Exception:
+                pass
+        finally:
+            try:
+                self._device_tasks.pop(target_index)
+            except Exception:
+                pass
+
+        backoff = 0.0
+        if restart_count > 3:
+            backoff = min(2.0, 0.5 * restart_count)
+            logger.warning(f"Scheduling {backoff:.1f}s backoff before restarting {dev_name}")
+
+        if backoff <= 0.0:
+            try:
+                self._start_device_task_now(device, target_index, dev_name, restart_count)
                 return True
             except Exception as restart_error:
                 logger.error(f"Failed to restart task for {dev_name}: {restart_error}")
                 return False
-        return False
+
+        ready_at = time.perf_counter() + backoff
+        self._pending_task_restarts[id(device)] = {
+            'device': device,
+            'index': target_index,
+            'dev_name': dev_name,
+            'restart_count': restart_count,
+            'ready_at': ready_at,
+            'attempts': 0,
+        }
+        return True
 
     def _device_key(self, device: Any) -> str:
         try:
@@ -1120,15 +1256,20 @@ class DAQStreamer:
                         if 'v_per_v' in entry:
                             lcVv[idx] = entry['v_per_v']
             # Do not fill-forward in the CSV; we want NaN to make gaps explicit
-
-            self._pending_log_rows.append({
-                'ptPsi': ptPsi,
-                'ptmA': ptmA,
-                'lcLbf': lcLbf,
-                'lcVv': lcVv,
-                'ptOk': ptOk,
-                'lcOk': lcOk,
-            })
+            if ptOk:
+                self._pending_pt_rows.append({
+                    'ptPsi': ptPsi,
+                    'ptmA': ptmA,
+                    'ptOk': True,
+                    'loop_index': self._loop_index,
+                })
+            if lcOk:
+                self._pending_lc_rows.append({
+                    'lcLbf': lcLbf,
+                    'lcVv': lcVv,
+                    'lcOk': True,
+                    'loop_index': self._loop_index,
+                })
 
         # After queuing, we can write rows during logging flush
     
@@ -1146,30 +1287,38 @@ class DAQStreamer:
             
             # Create filename with time (HHMM.csv)
             time_str = now.strftime("%H%M")
-            log_path = log_dir / f"{time_str}.csv"
+            pt_log_path = log_dir / f"{time_str}_pt.csv"
+            lc_log_path = log_dir / f"{time_str}_lc.csv"
             
             # If file exists, append a number
             counter = 1
-            while log_path.exists():
-                log_path = log_dir / f"{time_str}_{counter}.csv"
+            while pt_log_path.exists() or lc_log_path.exists():
+                pt_log_path = log_dir / f"{time_str}_pt_{counter}.csv"
+                lc_log_path = log_dir / f"{time_str}_lc_{counter}.csv"
                 counter += 1
             
-            self.log_file = open(log_path, 'w', newline='')
-            self.log_writer = csv.writer(self.log_file)
+            self.pt_log_file = open(pt_log_path, 'w', newline='')
+            self.pt_log_writer = csv.writer(self.pt_log_file)
+            self.lc_log_file = open(lc_log_path, 'w', newline='')
+            self.lc_log_writer = csv.writer(self.lc_log_file)
             
-            # Write merged header: PT psi + PT mA + LC lbf + LC V/V
-            header = ['timestamp', 'elapsed_ms', 'wall_ms', 'loop_index', 'pt_ok', 'lc_ok']
+            # Write PT header
+            pt_header = ['timestamp', 'elapsed_ms', 'wall_ms', 'loop_index', 'pt_ok']
             for i in range(16):
-                header.append(f'PT{i}_psi')
+                pt_header.append(f'PT{i}_psi')
             for i in range(16):
-                header.append(f'PT{i}_mA')
-            for i in range(4):
-                header.append(f'LC{i}_lbf')
-            for i in range(4):
-                header.append(f'LC{i}_VperV')
+                pt_header.append(f'PT{i}_mA')
+            self.pt_log_writer.writerow(pt_header)
+            self.pt_log_file.flush()
             
-            self.log_writer.writerow(header)
-            self.log_file.flush()
+            # Write LC header
+            lc_header = ['timestamp', 'elapsed_ms', 'wall_ms', 'loop_index', 'lc_ok']
+            for i in range(4):
+                lc_header.append(f'LC{i}_lbf')
+            for i in range(4):
+                lc_header.append(f'LC{i}_VperV')
+            self.lc_log_writer.writerow(lc_header)
+            self.lc_log_file.flush()
 
             # Start raw CSV alongside merged CSV
             raw_log_path = log_dir / f"{time_str}_raw.csv"
@@ -1183,12 +1332,17 @@ class DAQStreamer:
             self.raw_log_file.flush()
             
             self.logging_enabled = True
-            self.log_filename = str(log_path)
+            self.log_filename = str(pt_log_path)
+            self.lc_log_filename = str(lc_log_path)
             self.raw_log_filename = str(raw_log_path)
             self.log_data_count = 0
+            self.lc_log_data_count = 0
             self.log_start_time = time.time()
-            self._pending_log_rows = []
-            self._accumulated_samples = 0
+            self._pending_pt_rows = []
+            self._pending_lc_rows = []
+            self._accumulated_pt_samples = 0
+            self._accumulated_lc_samples = 0
+            self._device_sample_rates.clear()
             
             logger.info(f"Started CSV logging: {self.log_filename}")
             try:
@@ -1199,9 +1353,12 @@ class DAQStreamer:
         
         except Exception as e:
             logger.error(f"Failed to start logging: {e}")
-            if self.log_file:
-                self.log_file.close()
-                self.log_file = None
+            if self.pt_log_file:
+                self.pt_log_file.close()
+                self.pt_log_file = None
+            if self.lc_log_file:
+                self.lc_log_file.close()
+                self.lc_log_file = None
             return {"success": False, "message": str(e)}
     
     def stop_logging(self) -> Dict:
@@ -1210,35 +1367,61 @@ class DAQStreamer:
             return {"success": False, "message": "Logging not active"}
         
         try:
+            try:
+                self._flush_pending_logs()
+            except Exception as flush_error:
+                logger.error(f"Failed to flush pending logs before stop: {flush_error}")
+
             self.logging_enabled = False
-            if self.log_file:
-                self.log_file.close()
-                self.log_file = None
+            if self.pt_log_file:
+                self.pt_log_file.close()
+                self.pt_log_file = None
+            if self.lc_log_file:
+                self.lc_log_file.close()
+                self.lc_log_file = None
             if self.raw_log_file:
                 try:
                     self.raw_log_file.close()
                 except Exception:
                     pass
                 self.raw_log_file = None
-            self._pending_log_rows = []
+            self._pending_pt_rows = []
+            self._pending_lc_rows = []
             self.log_start_time = None
             
-            logger.info(f"Stopped CSV logging. Wrote {self.log_data_count} rows to {self.log_filename}")
+            logger.info(
+                f"Stopped CSV logging. Wrote {self.log_data_count} PT rows to {self.log_filename} and "
+                f"{self.lc_log_data_count} LC rows to {self.lc_log_filename}"
+            )
             filename = self.log_filename
             raw_filename = self.raw_log_filename
-            rows = self.log_data_count
+            lc_filename = self.lc_log_filename
+            pt_rows = self.log_data_count
+            lc_rows = self.lc_log_data_count
             self.log_filename = None
+            self.lc_log_filename = None
             self.raw_log_filename = None
-            self.log_writer = None
+            self.pt_log_writer = None
+            self.lc_log_writer = None
             self.raw_log_writer = None
             self.log_data_count = 0
+            self.lc_log_data_count = 0
+            self._device_sample_rates.clear()
             
             try:
-                self._write_logging_status_file(active=False, filename=filename, rows=rows)
+                self._write_logging_status_file(active=False, filename=filename, rows=pt_rows)
             except Exception:
                 pass
 
-            return {"success": True, "message": "Logging stopped", "rows": rows, "filename": filename, "raw_filename": raw_filename}
+            return {
+                "success": True,
+                "message": "Logging stopped",
+                "rows": pt_rows,
+                "lc_rows": lc_rows,
+                "filename": filename,
+                "lc_filename": lc_filename,
+                "raw_filename": raw_filename,
+            }
         
         except Exception as e:
             logger.error(f"Failed to stop logging: {e}")
@@ -1253,55 +1436,68 @@ class DAQStreamer:
             "elapsed_sec": (time.time() - self.log_start_time) if self.log_start_time else 0
         }
     
-    def _write_merged_log_entry(self) -> None:
-        """Write a merged PT+LC row to CSV log using last-known values."""
-        if not self.logging_enabled or self.log_writer is None:
+    def _compute_log_timestamp(self, sample_index: int, sample_rate: float) -> tuple[str, int]:
+        if self.log_start_time is not None and sample_rate > 0.0:
+            seconds = sample_index / sample_rate
+            timestamp = datetime.fromtimestamp(self.log_start_time + seconds, timezone.utc).isoformat().replace('+00:00', 'Z')
+            elapsed_ms = int(seconds * 1000.0)
+        else:
+            timestamp = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+            elapsed_ms = 0
+        return timestamp, elapsed_ms
+
+    def _flush_pending_logs(self) -> None:
+        """Write queued PT and LC rows to their respective CSV logs."""
+        if not self.logging_enabled:
             return
 
         with self.log_lock:
-            while self._pending_log_rows:
-                sample = self._pending_log_rows.pop(0)
+            pt_rate = self._device_sample_rates.get('pt', self.sample_clock_hz if self.sample_clock_hz > 0 else 100.0)
+            lc_rate = self._device_sample_rates.get('lc', self.sample_clock_hz if self.sample_clock_hz > 0 else 100.0)
 
-                if self.sample_clock_hz > 0.0 and self.log_start_time:
-                    base_time = self.log_start_time + (self._accumulated_samples / self.sample_clock_hz)
-                    timestamp = datetime.fromtimestamp(base_time, timezone.utc).isoformat().replace('+00:00', 'Z')
-                else:
-                    timestamp = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
-                elapsed_ms = int((self._accumulated_samples / self.sample_clock_hz) * 1000)
-
-                # Additional diagnostics: wall-clock ms and loop index
+            while self._pending_pt_rows and self.pt_log_writer is not None:
+                sample = self._pending_pt_rows.pop(0)
+                timestamp, elapsed_ms = self._compute_log_timestamp(self._accumulated_pt_samples, pt_rate)
                 wall_ms = int(time.time() * 1000)
-                # Presence flags prefer explicit markers from queue, fallback to numeric check
-                def _has_numeric(vals: list) -> bool:
-                    try:
-                        return any(isinstance(v, (int, float)) for v in vals)
-                    except Exception:
-                        return False
-                if 'ptOk' in sample:
-                    pt_ok = 1 if sample.get('ptOk') else 0
-                else:
-                    pt_ok = 1 if _has_numeric(sample.get('ptPsi', [])) else 0
-                if 'lcOk' in sample:
-                    lc_ok = 1 if sample.get('lcOk') else 0
-                else:
-                    lc_ok = 1 if _has_numeric(sample.get('lcLbf', [])) else 0
-                row = [timestamp, elapsed_ms, wall_ms, self._loop_index, pt_ok, lc_ok]
-                row.extend(sample['ptPsi'])
-                row.extend(sample['ptmA'])
-                row.extend(sample['lcLbf'])
-                row.extend(sample['lcVv'])
-
-                self.log_writer.writerow(row)
+                row = [
+                    timestamp,
+                    elapsed_ms,
+                    wall_ms,
+                    sample.get('loop_index', self._loop_index),
+                    1 if sample.get('ptOk') else 0,
+                ]
+                row.extend(sample.get('ptPsi', []))
+                row.extend(sample.get('ptmA', []))
+                self.pt_log_writer.writerow(row)
                 self.log_data_count += 1
-                # Advance by the chunk size to reflect wall-time distance between rows
-                try:
-                    inc = int(self.samples_per_read) if int(self.samples_per_read) > 0 else 1
-                except Exception:
-                    inc = 1
-                self._accumulated_samples += inc
+                self._accumulated_pt_samples += 1
 
-                if self.log_data_count % 10 == 0:
-                    self.log_file.flush()
+                if self.log_data_count % 10 == 0 and self.pt_log_file is not None:
+                    self.pt_log_file.flush()
+                    try:
+                        self._write_logging_status_file(active=True)
+                    except Exception:
+                        pass
+
+            while self._pending_lc_rows and self.lc_log_writer is not None:
+                sample = self._pending_lc_rows.pop(0)
+                timestamp, elapsed_ms = self._compute_log_timestamp(self._accumulated_lc_samples, lc_rate)
+                wall_ms = int(time.time() * 1000)
+                row = [
+                    timestamp,
+                    elapsed_ms,
+                    wall_ms,
+                    sample.get('loop_index', self._loop_index),
+                    1 if sample.get('lcOk') else 0,
+                ]
+                row.extend(sample.get('lcLbf', []))
+                row.extend(sample.get('lcVv', []))
+                self.lc_log_writer.writerow(row)
+                self.lc_log_data_count += 1
+                self._accumulated_lc_samples += 1
+
+                if self.lc_log_data_count % 10 == 0 and self.lc_log_file is not None:
+                    self.lc_log_file.flush()
                     try:
                         self._write_logging_status_file(active=True)
                     except Exception:
@@ -1312,7 +1508,7 @@ class DAQStreamer:
             return
         # Use logging clock for consistent timestamps
         if self.log_start_time is not None and self.sample_clock_hz > 0.0:
-            ts = datetime.fromtimestamp(self.log_start_time + (self._accumulated_samples / self.sample_clock_hz), timezone.utc).isoformat().replace('+00:00', 'Z')
+            ts = datetime.fromtimestamp(self.log_start_time + (self._accumulated_pt_samples / self.sample_clock_hz), timezone.utc).isoformat().replace('+00:00', 'Z')
         else:
             ts = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
         dev_name = str(getattr(device, 'device_info', {}).get('device_type', 'unknown'))
@@ -1332,10 +1528,15 @@ class DAQStreamer:
     def _write_logging_status_file(self, active: bool, filename: str = None, rows: int = None) -> None:
         """Persist logging status for Node/UI to read."""
         try:
+            pt_filename = filename if filename is not None else self.log_filename
             data = {
                 "active": active,
-                "filename": filename if filename is not None else self.log_filename,
+                "filename": pt_filename,
+                "pt_filename": pt_filename,
+                "lc_filename": self.lc_log_filename,
                 "rows": rows if rows is not None else self.log_data_count,
+                "pt_rows": self.log_data_count,
+                "lc_rows": self.lc_log_data_count,
                 "elapsed_sec": (time.time() - self.log_start_time) if (active and self.log_start_time) else 0,
                 "updated_at": datetime.now().isoformat(),
             }
@@ -1346,41 +1547,74 @@ class DAQStreamer:
     
     def send_to_node_sync(self, data: Dict[str, Any]) -> None:
         """Send JSON data to Node.js TCP port using a persistent socket."""
-        message = json.dumps(data) + '\n'
-        payload = message.encode('utf-8')
+        payload = (json.dumps(data) + '\n').encode('utf-8')
 
-        for attempt in range(2):
-            sock = self._ensure_node_socket()
-            if sock is None:
-                time.sleep(0.02)
-                continue
-            try:
-                sock.sendall(payload)
-                return
-            except OSError:
-                self._close_node_socket()
-                time.sleep(0.02)
+        sock = self._ensure_node_socket()
+        if sock is None:
+            return
 
-    def _ensure_node_socket(self) -> socket.socket | None:
-        if self._node_socket is not None:
-            return self._node_socket
         try:
-            sock = socket.create_connection((self.node_host, self.node_port), timeout=0.5)
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            sock.settimeout(0.5)
-            self._node_socket = sock
-            return sock
-        except OSError:
+            sock.sendall(payload)
+        except (BlockingIOError, InterruptedError):
+            # Send buffer full; drop this frame to keep acquisition loop realtime
+            return
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError) as err:
+            logger.warning(f"Node socket error ({err}); scheduling reconnect")
             self._close_node_socket()
-            return None
+            self._schedule_reconnect()
+
+    def _ensure_node_socket(self) -> Optional[socket.socket]:
+        with self._socket_lock:
+            sock = self._node_socket
+        if sock is None:
+            self._schedule_reconnect()
+        return sock
 
     def _close_node_socket(self) -> None:
-        if self._node_socket is not None:
+        sock: Optional[socket.socket]
+        with self._socket_lock:
+            sock = self._node_socket
+            self._node_socket = None
+        if sock is not None:
             try:
-                self._node_socket.close()
+                sock.close()
             except OSError:
                 pass
-            self._node_socket = None
+
+    def _schedule_reconnect(self, delay: float = 0.0) -> None:
+        with self._reconnect_lock:
+            if self._reconnecting:
+                return
+            self._reconnecting = True
+
+        def _worker(start_delay: float) -> None:
+            self._reconnect_loop(start_delay)
+
+        threading.Thread(target=_worker, args=(delay,), daemon=True).start()
+
+    def _reconnect_loop(self, delay: float) -> None:
+        if delay > 0.0:
+            time.sleep(delay)
+
+        try:
+            while self.running:
+                with self._socket_lock:
+                    if self._node_socket is not None:
+                        break
+                try:
+                    sock = socket.create_connection((self.node_host, self.node_port), timeout=0.5)
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                    sock.setblocking(False)
+                    with self._socket_lock:
+                        self._node_socket = sock
+                    logger.info("Connected to Node server")
+                    break
+                except OSError:
+                    time.sleep(1.0)
+        finally:
+            with self._reconnect_lock:
+                self._reconnecting = False
     
     def _cleanup_lingering_resources(self) -> None:
         """Clean up any lingering NI-DAQmx resources at startup"""
@@ -1408,6 +1642,7 @@ class DAQStreamer:
         # Clean up any lingering resources before starting
         self._cleanup_lingering_resources()
         self.running = True
+        self._schedule_reconnect()
         logger.info("Starting DAQ streaming...")
         logger.info(f"Active devices: {[d.device_info['device_type'] for d in self.devices]}")
         

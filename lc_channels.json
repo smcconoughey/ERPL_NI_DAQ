@@ -44,7 +44,7 @@
                 "calibration": {
                     "slope": 59447.9,
                     "offset": -2.91,
-                    "tare_offset": 113
+                    "tare_offset": 130
                 }
             }
         },

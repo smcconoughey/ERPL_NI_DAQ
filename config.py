@@ -11,7 +11,7 @@ DEBUG_RAW_SAMPLES = False      # Log a few raw samples per channel periodically
 DEBUG_SAMPLE_EVERY_N = 50      # How often to log raw samples (reads)
 
 # Target UI/WebSocket send rate (Hz)
-TARGET_SEND_HZ = 10.0
+TARGET_SEND_HZ = 100.0
 
 # Device configuration
 DEVICE_CHASSIS = "cDAQ9189-2462EFD"  # Actual device name from NI MAX
