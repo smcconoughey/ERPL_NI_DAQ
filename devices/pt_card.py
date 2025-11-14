@@ -164,7 +164,7 @@ class PTCard(BaseDevice):
             psi = (float(current_ma) - 4.0) * (10000.0 / 16.0)
         # Apply per-channel tare offset
         psi -= float(self.tare_offsets.get(channel, 0.0))
-        return max(0.0, psi)
+        return psi
     
     def get_sensor_info(self, channel):
         if channel in self.sensor_config:

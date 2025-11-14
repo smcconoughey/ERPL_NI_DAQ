@@ -7,7 +7,7 @@
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
-    <title>NI DAQ Telemetry</title>
+    <title>NI DAQ Spectator (Read-Only)</title>
     <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
@@ -272,63 +272,13 @@
             border-color: #f6ad55;
         }
 
-        .telemetry-header-row {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 6px;
-        }
-
         .telemetry-label {
             font-size: 12px;
             color: #718096;
+            margin-bottom: 6px;
             font-weight: 600;
             text-transform: uppercase;
             letter-spacing: 0.5px;
-        }
-
-        .tare-individual-btn {
-            background: transparent;
-            border: 1px solid #cbd5e0;
-            border-radius: 4px;
-            padding: 2px 6px;
-            cursor: pointer;
-            color: #4a5568;
-            font-size: 10px;
-            transition: all 0.2s;
-        }
-
-        .tare-individual-btn:hover {
-            background-color: #edf2f7;
-            border-color: #a0aec0;
-            color: #2d3748;
-        }
-
-        .tare-individual-btn:active {
-            background-color: #e2e8f0;
-        }
-
-        .dump-tare-btn {
-            background-color: #805ad5;
-            color: white;
-            border: none;
-            border-radius: 6px;
-            padding: 6px 12px;
-            font-size: 11px;
-            font-weight: bold;
-            cursor: pointer;
-            transition: background-color 0.2s;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-
-        .dump-tare-btn:hover {
-            background-color: #6b46c1;
-        }
-
-        .dump-tare-btn:active {
-            background-color: #553c9a;
         }
 
         .telemetry-value {
@@ -382,7 +332,7 @@
 
         .sparkline {
             width: 100%;
-            height: 36px;
+            height: 60px;
             margin-top: 6px;
             max-width: 100%;
             display: block;
@@ -391,7 +341,7 @@
         canvas.sparkline { 
             image-rendering: pixelated;
             max-width: 100% !important;
-            height: 36px !important;
+            height: 60px !important;
         }
 
         @keyframes pulse {
@@ -452,11 +402,11 @@
             }
 
             .sparkline {
-                height: 60px;
+                height: 80px;
             }
 
             canvas.sparkline {
-                height: 60px !important;
+                height: 80px !important;
             }
         }
     </style>
@@ -465,9 +415,7 @@
 <body>
     <div class="header">
         <div class="center-controls">
-            <button class="new-log-btn" onclick="createNewLogFile()">
-                <i class="fas fa-file-circle-plus"></i> Create New Log File
-            </button>
+            <div style="font-size: 18px; font-weight: bold; color: #e53e3e;">SPECTATOR MODE (READ-ONLY)</div>
             <div class="log-status">
                 <div class="log-indicator active" id="log-indicator"></div>
                 <span id="log-filename">Logging to: --</span>
@@ -493,11 +441,6 @@
             <span id="message-count">0 messages</span>
         </div>
         <div class="info-item">
-            <button class="dump-tare-btn" onclick="dumpTareConfig()" title="Download tare configuration">
-                <i class="fas fa-download"></i> Dump Tares
-            </button>
-        </div>
-        <div class="info-item">
             <i class="fas fa-tachometer-alt"></i>
             <span id="perf-latency" title="Average read latency">Latency: --</span>
         </div>
@@ -521,9 +464,6 @@
                         PRESSURE TRANSDUCERS
                         <span class="telemetry-count" id="pt-count">16 channels</span>
                     </div>
-                    <button class="new-log-btn" onclick="tarePTs()" style="font-size: 12px; padding: 6px 12px;">
-                        <i class="fas fa-bullseye"></i> Tare PTs
-                    </button>
                 </div>
                 <div class="telemetry-grid" id="pt-readings"></div>
             </div>
@@ -536,9 +476,6 @@
                         LOAD CELLS
                         <span class="telemetry-count" id="lc-count">4 channels</span>
                     </div>
-                    <button class="new-log-btn" onclick="tareLCs()" style="font-size: 12px; padding: 6px 12px;">
-                        <i class="fas fa-balance-scale"></i> Tare Load Cells
-                    </button>
                 </div>
                 <div class="telemetry-grid" id="lc-readings"></div>
             </div>
@@ -586,19 +523,14 @@
             div.className = 'telemetry-item';
             div.id = `${type.toLowerCase()}-${channel}`;
             div.innerHTML = `
-                <div class="telemetry-header-row">
-                    <div class="telemetry-label">${type}${channel}</div>
-                    <button class="tare-individual-btn" onclick="tareIndividual('${type.toLowerCase()}', ${channel})" title="Tare this sensor">
-                        <i class="fas fa-ring"></i>
-                    </button>
-                </div>
+                <div class="telemetry-label">${type}${channel}</div>
                 <div class="telemetry-value">--</div>
                 <div class="telemetry-units">${units}</div>
                 <div class="telemetry-raw-row">
                     <div class="telemetry-raw">--</div>
                     <div class="telemetry-details"></div>
                 </div>
-                <canvas class="sparkline" width="600" height="72"></canvas>
+                <canvas class="sparkline" width="600" height="120"></canvas>
             `;
             return div;
         }
@@ -724,6 +656,8 @@
         }
 
         function createNewLogFile() {
+            // Disabled in spectator mode
+            return;
             if (!ws || ws.readyState !== WebSocket.OPEN) {
                 Swal.fire({
                     title: 'Connection Error',
@@ -785,6 +719,8 @@
         }
 
         function tareLCs() {
+            // Disabled in spectator mode
+            return;
             if (!ws || ws.readyState !== WebSocket.OPEN) {
                 Swal.fire({
                     title: 'Connection Error',
@@ -829,6 +765,8 @@
         }
 
         function tarePTs() {
+            // Disabled in spectator mode
+            return;
             if (!ws || ws.readyState !== WebSocket.OPEN) {
                 Swal.fire({
                     title: 'Connection Error',
@@ -869,114 +807,6 @@
                         });
                     }
                 }
-            });
-        }
-
-        function tareIndividual(type, channel) {
-            if (!ws || ws.readyState !== WebSocket.OPEN) {
-                Swal.fire({
-                    title: 'Connection Error',
-                    text: 'WebSocket not connected',
-                    icon: 'error',
-                    toast: true,
-                    position: 'top-end',
-                    timer: 2500,
-                    showConfirmButton: false,
-                    backdrop: false
-                });
-                return;
-            }
-
-            const sensorName = type === 'pt' ? `PT${channel}` : `LC${channel}`;
-            
-            Swal.fire({
-                title: `Tare ${sensorName}?`,
-                text: `This will zero ${sensorName} at its current value`,
-                icon: 'question',
-                showCancelButton: true,
-                confirmButtonColor: '#3182ce',
-                cancelButtonColor: '#a0aec0',
-                confirmButtonText: 'Tare Now'
-            }).then((result) => {
-                if (result.isConfirmed) {
-                    try {
-                        const action = type === 'pt' ? 'tare_pt_channel' : 'tare_lc_channel';
-                        ws.send(JSON.stringify({ action: action, channel: channel }));
-                        
-                        Swal.fire({
-                            title: 'Tared!',
-                            text: `${sensorName} has been tared`,
-                            icon: 'success',
-                            toast: true,
-                            position: 'top-end',
-                            timer: 2000,
-                            showConfirmButton: false,
-                            backdrop: false
-                        });
-                    } catch (error) {
-                        console.error('Failed to send individual tare command:', error);
-                        Swal.fire({
-                            title: 'Error',
-                            text: 'Failed to send tare command',
-                            icon: 'error'
-                        });
-                    }
-                }
-            });
-        }
-
-        function dumpTareConfig() {
-            if (!ws || ws.readyState !== WebSocket.OPEN) {
-                Swal.fire({
-                    title: 'Connection Error',
-                    text: 'WebSocket not connected',
-                    icon: 'error',
-                    toast: true,
-                    position: 'top-end',
-                    timer: 2500,
-                    showConfirmButton: false,
-                    backdrop: false
-                });
-                return;
-            }
-
-            try {
-                ws.send(JSON.stringify({ action: 'get_tare_config' }));
-            } catch (error) {
-                console.error('Failed to request tare config:', error);
-                Swal.fire({
-                    title: 'Error',
-                    text: 'Failed to request tare configuration',
-                    icon: 'error'
-                });
-            }
-        }
-
-        function downloadTareConfig(config) {
-            const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-            const filename = `tare_config_${timestamp}.json`;
-            
-            const dataStr = JSON.stringify(config, null, 2);
-            const dataBlob = new Blob([dataStr], { type: 'application/json' });
-            const url = URL.createObjectURL(dataBlob);
-            
-            const link = document.createElement('a');
-            link.href = url;
-            link.download = filename;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-            URL.revokeObjectURL(url);
-
-            Swal.fire({
-                title: 'Downloaded!',
-                text: `Tare configuration saved as ${filename}`,
-                icon: 'success',
-                toast: true,
-                position: 'top-end',
-                timer: 2500,
-                showConfirmButton: false,
-                backdrop: false
             });
         }
 
@@ -1082,8 +912,6 @@
                         
                         updateTimestamp();
                         updateUpdateRate();
-                    } else if (msg.type === 'tare_config' && msg.data) {
-                        downloadTareConfig(msg.data);
                     } else if (msg.type === 'welcome') {
                         updateStatusBar(msg.message);
                     } else if (msg.success !== undefined && msg.message && msg.message.includes('Logging')) {
@@ -1199,15 +1027,28 @@
                     }]
                 },
                 options: {
-                    responsive: false,
+                    responsive: true,
                     maintainAspectRatio: false,
                     animation: false,
                     layout: {
-                        padding: { left: 2, right: 2, top: 2, bottom: 2 }
+                        padding: { left: 4, right: 4, top: 4, bottom: 4 }
                     },
                     plugins: {
                         legend: { display: false },
-                        tooltip: { enabled: false }
+                        tooltip: { 
+                            enabled: true,
+                            mode: 'nearest',
+                            intersect: false,
+                            callbacks: {
+                                title: function(context) {
+                                    const d = new Date(context[0].parsed.x);
+                                    return d.toLocaleTimeString();
+                                },
+                                label: function(context) {
+                                    return context.parsed.y.toFixed(3);
+                                }
+                            }
+                        }
                     },
                     scales: {
                         x: {
@@ -1221,16 +1062,28 @@
                                 unit: 'second',
                                 displayFormats: { second: 'mm:ss' }
                             },
-                            grid: { display: false },
-                            ticks: { display: false }
+                            grid: { display: true, color: 'rgba(0,0,0,0.05)' },
+                            ticks: { 
+                                display: true,
+                                font: { size: 9 },
+                                color: '#718096'
+                            }
                         },
                         y: {
-                            grid: { display: false },
-                            ticks: { display: false }
+                            grid: { display: true, color: 'rgba(0,0,0,0.05)' },
+                            ticks: { 
+                                display: true,
+                                font: { size: 9 },
+                                color: '#718096',
+                                callback: function(value) {
+                                    return value.toFixed(1);
+                                }
+                            }
                         }
                     },
                     elements: {
-                        line: { borderJoinStyle: 'round' }
+                        line: { borderJoinStyle: 'round', borderWidth: 2 },
+                        point: { radius: 0, hoverRadius: 4 }
                     }
                 }
             });

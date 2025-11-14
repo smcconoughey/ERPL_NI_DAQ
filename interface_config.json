@@ -13,7 +13,7 @@
   "sensors": [
     {
       "channel": 0,
-      "name": "LOX Reg Upstream",
+      "name": "PT1 LOX Reg Upstream",
       "id": "PT1E",
       "serial": "1A03TMKRS3W",
       "group": "lox",
@@ -26,7 +26,7 @@
     },
     {
       "channel": 1,
-      "name": "wf tank downstream",
+      "name": "PT2 LOX Reg Downstream",
       "id": "PT2E",
       "serial": "1A043JCJI2E",
       "group": "lox",
@@ -38,7 +38,7 @@
     },
     {
       "channel": 2,
-      "name": "wf tank upstream",
+      "name": "PT3 LOX tank upstream",
       "id": "PT3E",
       "serial": "1A043JCC7HX",
       "group": "lox",
@@ -50,7 +50,7 @@
     },
     {
       "channel": 3,
-      "name": "wf manifold",
+      "name": "PT4 LOX tank downstream",
       "id": "PT4E",
       "serial": "1A043JCHMIH",
       "group": "lox",
@@ -62,7 +62,7 @@
     },
     {
       "channel": 4,
-      "name": "venturi inlet",
+      "name": "PT5 LOX manifold",
       "id": "PT5E",
       "serial": "1A043JCBSIH",
       "group": "lox",
@@ -74,19 +74,19 @@
     },
     {
       "channel": 5,
-      "name": "venturi outlet",
+      "name": "PT11 Fuel reg upstream",
       "id": "PT11E",
-      "serial": "1A042U98Y2Q",
+      "serial": "1A042U98Y2G",
       "group": "fuel",
       "calibration": {
-        "max_psi": 1500.0,
+        "max_psi": 10000.0,
         "zero_ma": 4.0,
         "units": "psi"
       }
     },
     {
       "channel": 6,
-      "name": "Fuel Reg Downstream",
+      "name": "PT12 Fuel Reg Downstream",
       "id": "PT12E",
       "serial": "1A043JCGZIT",
       "group": "fuel",
@@ -98,7 +98,7 @@
     },
     {
       "channel": 7,
-      "name": "Fuel Tank Upstream",
+      "name": "PT13 Fuel Tank Upstream",
       "id": "PT13E",
       "serial": "1A01WPHB22R",
       "group": "fuel",
@@ -110,9 +110,9 @@
     },
     {
       "channel": 8,
-      "name": "Fuel Tank Downstream",
+      "name": "PT14 Fuel Tank Downstream",
       "id": "PT14E",
-      "serial": "",
+      "serial": "1A03YUNNS48",
       "group": "fuel",
       "calibration": {
         "max_psi": 1500.0,
@@ -122,7 +122,7 @@
     },
     {
       "channel": 9,
-      "name": "Fuel Engine Manifold",
+      "name": "PT15 Fuel Engine Manifold",
       "id": "PT15E",
       "serial": "1A043JCAH24",
       "group": "fuel",
@@ -134,7 +134,7 @@
     },
     {
       "channel": 10,
-      "name": "Pneumatics",
+      "name": "PT31 Muscle Bus",
       "id": "PT31E",
       "serial": "1A03UA1ZV3D",
       "group": "other",
@@ -146,7 +146,7 @@
     },
     {
       "channel": 11,
-      "name": "Purge Bus",
+      "name": "PT32 Purge Bus",
       "id": "PT32E",
       "serial": "1A040QHQC2O",
       "group": "other",
@@ -158,7 +158,7 @@
     },
     {
       "channel": 12,
-      "name": "LOX Venturi Upstream",
+      "name": "PT21 LOX Venturi Inlet",
       "id": "PT21E",
       "serial": "1A043JCEI29",
       "group": "other",
@@ -170,7 +170,7 @@
     },
     {
       "channel": 13,
-      "name": "LOX Venturi Downstream",
+      "name": "PT22 LOX Venturi Throat",
       "id": "PT22E",
       "serial": "1A043JCF51X",
       "group": "other",
@@ -182,7 +182,7 @@
     },
     {
       "channel": 14,
-      "name": "Fuel Venturi Downstream",
+      "name": "PT23 Fuel Venturi Throat",
       "id": "PT23E",
       "serial": "1A043JCD0HR",
       "group": "other",
@@ -194,7 +194,7 @@
     },
     {
       "channel": 15,
-      "name": "Fuel Venturi Upstream",
+      "name": "PT24 Fuel Venturi Inlet",
       "id": "PT24E",
       "serial": "1A043JCIA25",
       "group": "other",
