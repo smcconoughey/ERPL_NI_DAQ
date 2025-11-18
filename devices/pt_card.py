@@ -82,6 +82,29 @@ class PTCard(BaseDevice):
             # Non-fatal; leave existing offsets as-is
             pass
 
+    def tare_channels(self, channels: List[int], baseline_raw_data: List[List[float]]) -> None:
+        """Tare only the specified PT channels."""
+        if not channels:
+            return
+        try:
+            for channel_idx in channels:
+                if channel_idx < 0 or channel_idx >= len(baseline_raw_data):
+                    continue
+                channel_data = baseline_raw_data[channel_idx]
+                if not isinstance(channel_data, list) or not channel_data:
+                    continue
+                avg_current_a = sum(channel_data) / len(channel_data)
+                current_ma = avg_current_a * 1000.0
+                try:
+                    psi_no_tare = self._convert_no_tare(current_ma, channel_idx)
+                except Exception:
+                    continue
+                self.tare_offsets[channel_idx] = float(psi_no_tare)
+            if channels:
+                self.tared = True
+        except Exception:
+            pass
+
     def _convert_no_tare(self, current_ma, channel):
         if channel in self.sensor_config:
             config = self.sensor_config[channel]

@@ -125,6 +125,15 @@ class DAQWebSocketServer {
                     } else if (msg.action === 'tare_pt') {
                         const result = this.tarePTs();
                         ws.send(JSON.stringify(result));
+                    } else if (msg.action === 'tare_lc_channel' && typeof msg.channel === 'number') {
+                        const result = this.tareLCChannel(msg.channel);
+                        ws.send(JSON.stringify(result));
+                    } else if (msg.action === 'tare_pt_channel' && typeof msg.channel === 'number') {
+                        const result = this.tarePTChannel(msg.channel);
+                        ws.send(JSON.stringify(result));
+                    } else if (msg.action === 'get_tare_config') {
+                        const config = this.getTareConfig();
+                        ws.send(JSON.stringify({ type: 'tare_config', data: config }));
                     } else {
                         console.log('Received message from client:', message.toString());
                     }
@@ -268,6 +277,54 @@ class DAQWebSocketServer {
         } catch (error) {
             console.error('Failed to send PT tare command:', error);
             return { success: false, message: error.message };
+        }
+    }
+
+    tareLCChannel(channel) {
+        try {
+            const tareCmdPath = path.join(__dirname, `tare_lc_ch${channel}.cmd`);
+            fs.writeFileSync(tareCmdPath, `tare_lc_channel:${channel}`);
+            console.log(`LC channel ${channel} tare command sent to DAQ streamer`);
+            return { success: true, message: `LC${channel} will be tared on next data read.` };
+        } catch (error) {
+            console.error(`Failed to send LC channel ${channel} tare command:`, error);
+            return { success: false, message: error.message };
+        }
+    }
+
+    tarePTChannel(channel) {
+        try {
+            const tareCmdPath = path.join(__dirname, `tare_pt_ch${channel}.cmd`);
+            fs.writeFileSync(tareCmdPath, `tare_pt_channel:${channel}`);
+            console.log(`PT channel ${channel} tare command sent to DAQ streamer`);
+            return { success: true, message: `PT${channel} will be tared on next data read.` };
+        } catch (error) {
+            console.error(`Failed to send PT channel ${channel} tare command:`, error);
+            return { success: false, message: error.message };
+        }
+    }
+
+    getTareConfig() {
+        try {
+            const tareConfigPath = path.join(__dirname, 'tare_config.json');
+            if (fs.existsSync(tareConfigPath)) {
+                const raw = fs.readFileSync(tareConfigPath, 'utf-8');
+                return JSON.parse(raw);
+            }
+            // If file doesn't exist, return empty config
+            return {
+                pt_offsets: {},
+                lc_offsets: {},
+                timestamp: new Date().toISOString(),
+                note: 'No tare configuration found'
+            };
+        } catch (error) {
+            console.error('Failed to read tare config:', error);
+            return {
+                pt_offsets: {},
+                lc_offsets: {},
+                error: error.message
+            };
         }
     }
     

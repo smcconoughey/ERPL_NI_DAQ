@@ -3,8 +3,8 @@
         {
             "lc": {
                 "id": 1,
-                "name": "no",
-                "short_name": "thrust",
+                "name": "TLCA",
+                "short_name": "TLCA",
                 "units": "lbf",
                 "range": [-100, 100],
                 "warning_high": 80,
@@ -19,8 +19,8 @@
         {
             "lc": {
                 "id": 2,
-                "name": "no",
-                "short_name": "wt_lox",
+                "name": "TLCB",
+                "short_name": "TLCB",
                 "units": "lbf",
                 "range": [-100, 100],
                 "warning_high": 80,
@@ -52,7 +52,7 @@
             "lc": {
                 "id": 4,
                 "name": "LOX TANK WEIGHT",
-                "short_name": "lc_vert",
+                "short_name": "wt_lox",
                 "units": "lbf",
                 "range": [-100, 100],
                 "warning_high": 80,

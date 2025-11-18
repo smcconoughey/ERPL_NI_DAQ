@@ -355,6 +355,26 @@ class LCCard(BaseDevice):
         
         logger.info(f"Tare complete for {len(self.tare_offsets)} load cell channels")
 
+    def tare_channels(self, channels: List[int], baseline_raw_data: List[List[float]]) -> None:
+        """Tare only specified LC channels."""
+        if not channels:
+            return
+        for ch_idx in channels:
+            if ch_idx < 0 or ch_idx >= min(self.channel_count, len(baseline_raw_data)):
+                continue
+            samples = baseline_raw_data[ch_idx] if isinstance(baseline_raw_data[ch_idx], list) else []
+            if not samples:
+                continue
+            avg_v_per_v = sum(samples) / len(samples)
+            if ch_idx in self.lc_config:
+                cal = self.lc_config[ch_idx].get('calibration', {})
+                slope = cal.get('slope', 1000000.0)
+                offset = cal.get('offset', 0.0)
+                current_lbf = slope * avg_v_per_v + offset
+                self.tare_offsets[ch_idx] = current_lbf
+                lc_name = self.lc_config[ch_idx].get('name', f'LC{ch_idx}')
+                logger.info(f"Tared {lc_name} (ch{ch_idx}) via targeted request: offset = {current_lbf:.3f} lbf")
+
     def process_data(self, raw_data: List[List[float]]) -> Dict[str, Any]:
         result: List[Dict[str, Any]] = []
         per_sample_records: List[List[Dict[str, Any]]] = []

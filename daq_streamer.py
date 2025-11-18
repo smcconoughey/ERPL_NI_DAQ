@@ -11,6 +11,7 @@ import logging
 import threading
 import csv
 import signal
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator, Dict, Any, List, Tuple, Optional
@@ -129,6 +130,7 @@ class DAQStreamer:
         self.tare_cmd_file = Path(__file__).parent / 'tare.cmd'  # legacy: tare all
         self.tare_lc_cmd_file = Path(__file__).parent / 'tare_lc.cmd'
         self.tare_pt_cmd_file = Path(__file__).parent / 'tare_pt.cmd'
+        self.tare_config_file = Path(__file__).parent / 'tare_config.json'
         self.start_log_cmd = Path(__file__).parent / 'start_logging.cmd'
         self.stop_log_cmd = Path(__file__).parent / 'stop_logging.cmd'
         
@@ -448,6 +450,8 @@ class DAQStreamer:
             do_tare_all = self.tare_cmd_file.exists()
             do_tare_lc = self.tare_lc_cmd_file.exists()
             do_tare_pt = self.tare_pt_cmd_file.exists()
+            targeted_pt_channels, targeted_lc_channels = self._collect_channel_tare_requests()
+            tare_snapshot_needed = False
 
             device_samples_map: Dict[str, List[List[Dict[str, Any]]]] = {}
 
@@ -554,19 +558,42 @@ class DAQStreamer:
                                         f"{device.device_info['device_type']} ch{ch:02d} avg={avg_a:.6f} A  mA={(avg_a*1000):.3f}  n={len(samples)}"
                                     )
 
-                        # Tare command per device type
+                        # Tare command per device type (legacy + targeted)
                         try:
                             device_type = str(device.device_info.get('device_type', '')).lower()
+                            is_lc_device = 'lc' in device_type or 'load' in device_type
+                            is_pt_device = ('pt' in device_type) or ('pressure' in device_type)
                             should_tare = False
                             if do_tare_all:
                                 should_tare = True
-                            elif 'lc' in device_type and do_tare_lc:
+                            elif is_lc_device and do_tare_lc:
                                 should_tare = True
-                            elif ('pt' in device_type or 'pressure' in device_type) and do_tare_pt:
+                            elif is_pt_device and do_tare_pt:
                                 should_tare = True
+
+                            targeted_channels: List[int] = []
+                            if is_pt_device and targeted_pt_channels:
+                                targeted_channels = [ch for ch in targeted_pt_channels if 0 <= ch < len(dev_raw)]
+                            elif is_lc_device and targeted_lc_channels:
+                                targeted_channels = [ch for ch in targeted_lc_channels if 0 <= ch < len(dev_raw)]
+
                             if should_tare and hasattr(device, 'tare'):
                                 device.tare(dev_raw)
+                                tare_snapshot_needed = True
                                 logger.info(f"Tare executed for {device.device_info['device_type']}")
+
+                            if targeted_channels:
+                                if hasattr(device, 'tare_channels'):
+                                    device.tare_channels(targeted_channels, dev_raw)
+                                    tare_snapshot_needed = True
+                                    if is_pt_device:
+                                        targeted_pt_channels.difference_update(targeted_channels)
+                                    elif is_lc_device:
+                                        targeted_lc_channels.difference_update(targeted_channels)
+                                else:
+                                    logger.warning(
+                                        f"Device {device.device_info.get('device_type')} does not support per-channel tare; skipping targeted request"
+                                    )
                         except Exception as e:
                             logger.error(f"Failed to execute tare: {e}")
 
@@ -768,16 +795,39 @@ class DAQStreamer:
                         # Tare command check (apply targeted or legacy to all)
                         try:
                             device_type = str(device.device_info.get('device_type', '')).lower()
+                            is_lc_device = 'lc' in device_type or 'load' in device_type
+                            is_pt_device = ('pt' in device_type) or ('pressure' in device_type)
                             should_tare = False
                             if do_tare_all:
                                 should_tare = True
-                            elif 'lc' in device_type and do_tare_lc:
+                            elif is_lc_device and do_tare_lc:
                                 should_tare = True
-                            elif ('pt' in device_type or 'pressure' in device_type) and do_tare_pt:
+                            elif is_pt_device and do_tare_pt:
                                 should_tare = True
+
+                            targeted_channels: List[int] = []
+                            if is_pt_device and targeted_pt_channels:
+                                targeted_channels = [ch for ch in targeted_pt_channels if 0 <= ch < len(raw_data)]
+                            elif is_lc_device and targeted_lc_channels:
+                                targeted_channels = [ch for ch in targeted_lc_channels if 0 <= ch < len(raw_data)]
+
                             if should_tare and hasattr(device, 'tare'):
                                 device.tare(raw_data)
+                                tare_snapshot_needed = True
                                 logger.info(f"Tare executed for {device.device_info['device_type']}")
+
+                            if targeted_channels:
+                                if hasattr(device, 'tare_channels'):
+                                    device.tare_channels(targeted_channels, raw_data)
+                                    tare_snapshot_needed = True
+                                    if is_pt_device:
+                                        targeted_pt_channels.difference_update(targeted_channels)
+                                    elif is_lc_device:
+                                        targeted_lc_channels.difference_update(targeted_channels)
+                                else:
+                                    logger.warning(
+                                        f"Device {device.device_info.get('device_type')} does not support per-channel tare; skipping targeted request"
+                                    )
                         except Exception as e:
                             logger.error(f"Failed to execute tare: {e}")
 
@@ -883,6 +933,9 @@ class DAQStreamer:
                 pass
             except Exception:
                 pass
+
+            if tare_snapshot_needed:
+                self._write_tare_config_snapshot()
 
             # Emit merged frame to Node at 100 Hz cadence
             merged = {
@@ -1071,6 +1124,83 @@ class DAQStreamer:
             # Sensible defaults if configuration is missing or invalid
             self.loop_period_s = 0.10
             self.read_timeout_s = 0.50
+
+    def _collect_channel_tare_requests(self) -> Tuple[set[int], set[int]]:
+        base_path = Path(__file__).parent
+        pt_channels: set[int] = set()
+        lc_channels: set[int] = set()
+
+        def _consume(pattern: str, target_set: set[int]) -> None:
+            for cmd_path in base_path.glob(pattern):
+                try:
+                    channel = self._extract_channel_from_cmd(cmd_path)
+                    if channel is not None:
+                        target_set.add(channel)
+                finally:
+                    try:
+                        cmd_path.unlink()
+                    except FileNotFoundError:
+                        pass
+
+        _consume('tare_pt_ch*.cmd', pt_channels)
+        _consume('tare_lc_ch*.cmd', lc_channels)
+        return pt_channels, lc_channels
+
+    def _extract_channel_from_cmd(self, cmd_path: Path) -> Optional[int]:
+        channel: Optional[int] = None
+        stem = cmd_path.stem
+        candidates = [stem]
+        try:
+            content = cmd_path.read_text().strip()
+            if content:
+                candidates.append(content)
+        except Exception:
+            pass
+        for candidate in candidates:
+            match = re.search(r'ch(\d+)', candidate, re.IGNORECASE)
+            if not match:
+                match = re.search(r'(\d+)', candidate)
+            if match:
+                try:
+                    channel = int(match.group(1))
+                    break
+                except ValueError:
+                    continue
+        if channel is not None and channel < 0:
+            channel = None
+        return channel
+
+    def _write_tare_config_snapshot(self) -> None:
+        try:
+            data = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "pt_offsets": {},
+                "lc_offsets": {},
+            }
+            for device in self.devices:
+                try:
+                    device_type = str(device.device_info.get('device_type', '')).lower()
+                except Exception:
+                    device_type = ''
+                offsets = getattr(device, 'tare_offsets', None)
+                if not isinstance(offsets, dict):
+                    continue
+                if 'pt' in device_type or 'pressure' in device_type:
+                    target = data["pt_offsets"]
+                elif 'lc' in device_type or 'load' in device_type:
+                    target = data["lc_offsets"]
+                else:
+                    continue
+                for ch, value in offsets.items():
+                    try:
+                        target[str(int(ch))] = float(value)
+                    except Exception:
+                        continue
+            tmp_path = self.tare_config_file.with_suffix('.tmp')
+            tmp_path.write_text(json.dumps(data, indent=2))
+            tmp_path.replace(self.tare_config_file)
+        except Exception as e:
+            logger.error(f"Failed to write tare config snapshot: {e}")
 
     def _process_pending_restarts(self) -> None:
         if not self._pending_task_restarts:
