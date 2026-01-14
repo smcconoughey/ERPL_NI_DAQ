@@ -373,11 +373,29 @@
         }
 
         .telemetry-details {
-            font-size: 10px;
+            font-size: 11px;
             color: #718096;
-            font-family: monospace;
+            font-family: system-ui, -apple-system, sans-serif;
             text-align: right;
             white-space: nowrap;
+        }
+
+        .telemetry-delta {
+            font-size: 11px;
+            color: #718096;
+            font-family: system-ui, -apple-system, sans-serif;
+            text-align: right;
+            margin-top: 3px;
+            font-weight: 500;
+            letter-spacing: -0.2px;
+        }
+
+        .telemetry-delta.positive {
+            color: #38a169;
+        }
+
+        .telemetry-delta.negative {
+            color: #e53e3e;
         }
 
         .sparkline {
@@ -459,6 +477,36 @@
                 height: 60px !important;
             }
         }
+
+        /* PT Row Organization */
+        .pt-row {
+            display: flex;
+            flex-wrap: nowrap;
+            gap: 14px;
+            padding: 12px;
+            border-radius: 8px;
+            border: 3px solid;
+            margin-bottom: 10px;
+            overflow-x: auto;
+        }
+
+        .pt-row.fuel {
+            border-color: rgba(255, 102, 0, 0.2);
+        }
+
+        .pt-row.lox {
+            border-color: rgba(49, 130, 206, 0.2);
+        }
+
+        .pt-row.misc {
+            border-color: rgba(0, 204, 102, 0.2);
+        }
+
+        .pt-row .telemetry-item {
+            flex: 1 1 0;
+            min-width: 160px;
+            max-width: 220px;
+        }
     </style>
 </head>
 
@@ -525,7 +573,9 @@
                         <i class="fas fa-bullseye"></i> Tare PTs
                     </button>
                 </div>
-                <div class="telemetry-grid" id="pt-readings"></div>
+                <div class="pt-row fuel" id="pt-fuel-row"></div>
+                <div class="pt-row lox" id="pt-lox-row"></div>
+                <div class="pt-row misc" id="pt-misc-row"></div>
             </div>
 
             <!-- Load Cells Section -->
@@ -554,16 +604,62 @@
         let startTime = Date.now();
         let autoStartedLogging = false;
         let sensorConfig = null;
+        
+        // Track value history for smoothed delta calculation (rolling window)
+        const DELTA_WINDOW_MS = 20000; // 20 second window for averaging
+        const ptHistory = {}; // { channel: [{value, timestamp}, ...] }
+        const lcHistory = {}; // { channel: [{value, timestamp}, ...] }
+        
+        function calcSmoothedRate(history, channel, newValue, now) {
+            if (!history[channel]) history[channel] = [];
+            const arr = history[channel];
+            arr.push({ value: newValue, timestamp: now });
+            
+            // Prune old entries outside window
+            const cutoff = now - DELTA_WINDOW_MS;
+            while (arr.length > 0 && arr[0].timestamp < cutoff) {
+                arr.shift();
+            }
+            
+            // Need at least 2 points with some time separation
+            if (arr.length < 2) return null;
+            const oldest = arr[0];
+            const newest = arr[arr.length - 1];
+            const dtSec = (newest.timestamp - oldest.timestamp) / 1000;
+            if (dtSec < 0.5) return null; // need at least 0.5s span
+            
+            return (newest.value - oldest.value) / dtSec;
+        }
 
         async function initTelemetry() {
-            const ptGrid = document.getElementById('pt-readings');
+            const ptFuelRow = document.getElementById('pt-fuel-row');
+            const ptLoxRow = document.getElementById('pt-lox-row');
+            const ptMiscRow = document.getElementById('pt-misc-row');
             const lcGrid = document.getElementById('lc-readings');
 
-            // Create PT placeholders (16 channels)
-            for (let i = 0; i < 16; i++) {
+            // Define PT channel order for each row
+            // Fuel: PT11(5), PT12(6), PT13(7), PT14(8), PT24(15), PT23(14), PT15(9)
+            const fuelChannels = [5, 6, 7, 8, 15, 14, 9];
+            // LOX: PT1(0), PT2(1), PT3(2), PT4(3), PT21(12), PT22(13), PT5(4)
+            const loxChannels = [0, 1, 2, 3, 12, 13, 4];
+            // Misc: PT31(10), PT32(11)
+            const miscChannels = [10, 11];
+
+            // Create PT cards in order
+            fuelChannels.forEach(i => {
                 const item = createTelemetryItem('PT', i, 'PSI');
-                ptGrid.appendChild(item);
-            }
+                ptFuelRow.appendChild(item);
+            });
+
+            loxChannels.forEach(i => {
+                const item = createTelemetryItem('PT', i, 'PSI');
+                ptLoxRow.appendChild(item);
+            });
+
+            miscChannels.forEach(i => {
+                const item = createTelemetryItem('PT', i, 'PSI');
+                ptMiscRow.appendChild(item);
+            });
 
             // Create LC placeholders (4 channels)
             for (let i = 0; i < 4; i++) {
@@ -585,6 +681,8 @@
             const div = document.createElement('div');
             div.className = 'telemetry-item';
             div.id = `${type.toLowerCase()}-${channel}`;
+            const deltaUnit = type === 'PT' ? 'PSI/min' : 'lbf/min';
+            const deltaHtml = `<div class="telemetry-delta">Δ --</div>`;
             div.innerHTML = `
                 <div class="telemetry-header-row">
                     <div class="telemetry-label">${type}${channel}</div>
@@ -596,7 +694,10 @@
                 <div class="telemetry-units">${units}</div>
                 <div class="telemetry-raw-row">
                     <div class="telemetry-raw">--</div>
-                    <div class="telemetry-details"></div>
+                    <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 1px;">
+                        ${deltaHtml}
+                        <div class="telemetry-details"></div>
+                    </div>
                 </div>
                 <canvas class="sparkline" width="600" height="72"></canvas>
             `;
@@ -627,6 +728,7 @@
 
                 const valueEl = element.querySelector('.telemetry-value');
                 const rawEl = element.querySelector('.telemetry-raw');
+                const deltaEl = element.querySelector('.telemetry-delta');
                 const details = ensureDetails(element);
                 
                 element.classList.remove('disconnected', 'unconfigured');
@@ -634,15 +736,38 @@
                 if (ch.status === 'disconnected') {
                     valueEl.textContent = 'DISCONNECTED';
                     if (rawEl) rawEl.textContent = '--';
+                    if (deltaEl) {
+                        deltaEl.textContent = 'Δ --';
+                        deltaEl.classList.remove('positive', 'negative');
+                    }
                     element.classList.add('disconnected');
                 } else if (ch.status === 'unconfigured') {
                     valueEl.textContent = 'UNCONFIGURED';
                     if (rawEl) rawEl.textContent = '--';
+                    if (deltaEl) {
+                        deltaEl.textContent = 'Δ --';
+                        deltaEl.classList.remove('positive', 'negative');
+                    }
                     element.classList.add('unconfigured');
                 } else {
                     const psi = ch.pressure_psi !== undefined ? ch.pressure_psi : 0;
+                    const now = Date.now();
                     valueEl.textContent = psi.toFixed(3);
                     pushSpark('pt', idx, psi);
+                    
+                    // Calculate and display smoothed delta PSI/min (rate * 60)
+                    if (deltaEl) {
+                        const rate = calcSmoothedRate(ptHistory, idx, psi, now);
+                        if (rate !== null) {
+                            const ratePerMin = rate * 60;
+                            const sign = ratePerMin >= 0 ? '+' : '';
+                            deltaEl.textContent = `Δ ${sign}${ratePerMin.toFixed(1)} PSI/min`;
+                            
+                            deltaEl.classList.remove('positive', 'negative');
+                            if (ratePerMin > 6) deltaEl.classList.add('positive');
+                            else if (ratePerMin < -6) deltaEl.classList.add('negative');
+                        }
+                    }
                     
                     // Show raw current prominently
                     if (ch.current_ma !== undefined && rawEl) {
@@ -659,6 +784,7 @@
 
             channels.forEach((ch, arrayIdx) => {
                 if (!ch) return;
+                
                 const idx = (typeof ch.channel === 'number') ? ch.channel : arrayIdx;
                 const element = document.getElementById(`lc-${idx}`);
                 if (!element) return;
@@ -666,6 +792,7 @@
                 const labelEl = element.querySelector('.telemetry-label');
                 const valueEl = element.querySelector('.telemetry-value');
                 const rawEl = element.querySelector('.telemetry-raw');
+                const deltaEl = element.querySelector('.telemetry-delta');
                 const details = ensureDetails(element);
                 
                 // Update label with name from config
@@ -675,14 +802,27 @@
                 
                 // Display lbf value
                 const lbf = ch.lbf !== undefined ? ch.lbf : 0;
+                const now = Date.now();
                 valueEl.textContent = lbf.toFixed(3);
                 pushSpark('lc', idx, lbf);
 
-                // Show raw V/V prominently
+                // Calculate and display smoothed delta lbf/min (rate * 60)
+                if (deltaEl) {
+                    const rate = calcSmoothedRate(lcHistory, idx, lbf, now);
+                    if (rate !== null) {
+                        const ratePerMin = rate * 60;
+                        const sign = ratePerMin >= 0 ? '+' : '';
+                        deltaEl.textContent = `Δ ${sign}${ratePerMin.toFixed(1)} lbf/min`;
+                        
+                        deltaEl.classList.remove('positive', 'negative');
+                        if (ratePerMin > 6) deltaEl.classList.add('positive');
+                        else if (ratePerMin < -6) deltaEl.classList.add('negative');
+                    }
+                }
+
+                // Show raw V/V prominently (only update if provided, preserve existing)
                 if (ch.v_per_v !== undefined && ch.v_per_v !== null && rawEl) {
                     rawEl.textContent = `${Number(ch.v_per_v).toFixed(6)} V/V`;
-                } else if (rawEl) {
-                    rawEl.textContent = '-- V/V';
                 }
             });
         }
@@ -1200,10 +1340,10 @@
                     datasets: [{
                         data: [],
                         borderColor: type === 'pt' ? '#3182ce' : '#805ad5',
-                        borderWidth: 1,
+                        borderWidth: 2,
                         pointRadius: 0,
                         fill: false,
-                        tension: 0,
+                        tension: 0.3,
                         spanGaps: true
                     }]
                 },

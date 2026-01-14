@@ -204,5 +204,33 @@
         "units": "psi"
       }
     }
-  ]
-} 
+  ],
+  "blowdown": {
+    "rows": [
+      {
+        "label": "Fuel Blowdown",
+        "group": "fuel",
+        "color": "#ff8800",
+        "order": 0,
+        "channels": [5, 6, 7, 8, 9],
+        "description": "Fuel regulator upstream → tank manifold"
+      },
+      {
+        "label": "LOX Blowdown",
+        "group": "lox",
+        "color": "#22c55e",
+        "order": 1,
+        "channels": [0, 1, 2, 3, 4],
+        "description": "LOX regulator upstream → engine manifold"
+      },
+      {
+        "label": "Misc Systems",
+        "group": "other",
+        "color": "#1d4ed8",
+        "order": 2,
+        "channels": [10, 11, 12, 13, 14, 15],
+        "description": "Auxiliary buses and venturi diagnostics"
+      }
+    ]
+  }
+}

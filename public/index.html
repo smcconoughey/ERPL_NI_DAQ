@@ -142,6 +142,96 @@
             border-color: #009900;
         }
 
+        .blowdown-board {
+            padding: 12px;
+            background: #0b0f16;
+            border-bottom: 3px solid #222;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .blowdown-row {
+            border: 3px solid #1f2933;
+            border-radius: 8px;
+            padding: 10px;
+            background: #111926;
+        }
+
+        .blowdown-row.fuel {
+            border-color: #ff8800;
+        }
+
+        .blowdown-row.lox {
+            border-color: #22c55e;
+        }
+
+        .blowdown-row.other {
+            border-color: #3b82f6;
+        }
+
+        .blowdown-row-title {
+            font-size: 14px;
+            font-weight: bold;
+            text-transform: uppercase;
+            color: #e2e8f0;
+            letter-spacing: 0.05em;
+            margin-bottom: 6px;
+        }
+
+        .blowdown-sensors {
+            display: flex;
+            align-items: stretch;
+            gap: 8px;
+        }
+
+        .blowdown-sensor {
+            min-width: 80px;
+            padding: 8px;
+            border-radius: 6px;
+            background: #0f172a;
+            border: 2px solid rgba(255,255,255,0.1);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            flex: 1;
+        }
+
+        .blowdown-sensor .blowdown-name {
+            font-size: 12px;
+            color: #9ca3af;
+            margin-bottom: 4px;
+            text-align: center;
+            min-height: 28px;
+        }
+
+        .blowdown-sensor .blowdown-value {
+            font-size: 20px;
+            font-weight: bold;
+            color: #f8fafc;
+            margin-bottom: 2px;
+        }
+
+        .blowdown-sensor .blowdown-units {
+            font-size: 12px;
+            color: #94a3b8;
+        }
+
+        .blowdown-arrow {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #475569;
+            font-size: 18px;
+            min-width: 24px;
+        }
+
+        .blowdown-sensor.error {
+            border-color: #ff4d4f;
+            background: #2f0f0f;
+        }
+
         .sensor-name {
             font-size: 18px;
             font-weight: bold;
@@ -236,6 +326,8 @@
                 <span>SENSOR DATA</span>
                 <div class="status disconnected" id="status">DISCONNECTED</div>
             </div>
+
+            <div class="blowdown-board" id="blowdownBoard" style="display:none;"></div>
             
             <div class="sensor-grid" id="sensorGrid">
                 <div class="group-section">
@@ -266,6 +358,8 @@
                 this.ws = null;
                 this.reconnectInterval = null;
                 this.sensors = new Map();
+                this.sensorByChannel = new Map();
+                this.sensorById = new Map();
                 this.connect();
                 this.loadConfig();
             }
@@ -284,6 +378,9 @@
             initializeSensors() {
                 if (!this.config || !this.config.sensors) return;
 
+                this.sensorByChannel.clear();
+                this.sensorById.clear();
+
                 const loxContainer = document.getElementById('loxSensors');
                 const fuelContainer = document.getElementById('fuelSensors');
                 const otherContainer = document.getElementById('otherSensors');
@@ -293,6 +390,13 @@
                 otherContainer.innerHTML = '';
 
                 this.config.sensors.forEach(sensor => {
+                    if (typeof sensor.channel === 'number') {
+                        this.sensorByChannel.set(sensor.channel, sensor);
+                    }
+                    if (sensor.id) {
+                        this.sensorById.set(sensor.id, sensor);
+                    }
+
                     const sensorElement = this.createSensorElement(sensor);
                     
                     switch(sensor.group) {
@@ -307,6 +411,8 @@
                             break;
                     }
                 });
+
+                this.renderBlowdownBoard();
             }
 
             createSensorElement(sensor) {
@@ -318,6 +424,115 @@
                     <div class="sensor-value">---.--</div>
                     <div class="sensor-units">PSI</div>
                     <div class="sensor-details">Ch${sensor.channel} • ${sensor.id} • <span class="sensor-current">--.- mA</span> • <span class="sensor-state">OK</span></div>
+                `;
+                return div;
+            }
+
+            renderBlowdownBoard() {
+                const board = document.getElementById('blowdownBoard');
+                if (!board) return;
+
+                const rows = (this.config && this.config.blowdown && Array.isArray(this.config.blowdown.rows))
+                    ? this.config.blowdown.rows.slice()
+                    : [];
+
+                if (!rows.length) {
+                    board.style.display = 'none';
+                    board.innerHTML = '';
+                    return;
+                }
+
+                board.style.display = 'flex';
+                board.innerHTML = '';
+
+                rows.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+
+                rows.forEach(row => {
+                    const rowDiv = document.createElement('div');
+                    rowDiv.className = `blowdown-row ${row.group || ''}`;
+                    if (row.color) {
+                        rowDiv.style.borderColor = row.color;
+                    }
+
+                    const title = document.createElement('div');
+                    title.className = 'blowdown-row-title';
+                    title.textContent = row.label || row.name || (row.group || 'BLOWDOWN');
+                    rowDiv.appendChild(title);
+
+                    const sensorWrap = document.createElement('div');
+                    sensorWrap.className = 'blowdown-sensors';
+
+                    const sequence = Array.isArray(row.channels) ? row.channels : [];
+                    sequence.forEach((entry, index) => {
+                        const sensorConfig = this.resolveSensorEntry(entry);
+                        const sensorElement = this.createBlowdownSensorElement(sensorConfig, entry, row.group, row.color);
+                        sensorWrap.appendChild(sensorElement);
+                        if (index < sequence.length - 1) {
+                            const arrow = document.createElement('div');
+                            arrow.className = 'blowdown-arrow';
+                            arrow.textContent = '→';
+                            sensorWrap.appendChild(arrow);
+                        }
+                    });
+
+                    rowDiv.appendChild(sensorWrap);
+                    board.appendChild(rowDiv);
+                });
+            }
+
+            resolveSensorEntry(entry) {
+                if (entry === null || entry === undefined) return null;
+                if (typeof entry === 'number') {
+                    return this.sensorByChannel.get(entry) || null;
+                }
+                if (typeof entry === 'string') {
+                    return this.sensorById.get(entry) || this.sensorByChannel.get(Number(entry)) || null;
+                }
+                if (typeof entry === 'object' && typeof entry.channel === 'number') {
+                    return entry;
+                }
+                return null;
+            }
+
+            createBlowdownSensorElement(sensorConfig, fallback, group, color) {
+                const div = document.createElement('div');
+                div.className = `blowdown-sensor ${group || ''}`;
+
+                let channel = null;
+                let sensorId = null;
+                let name = 'Unassigned';
+
+                if (sensorConfig) {
+                    channel = sensorConfig.channel;
+                    sensorId = sensorConfig.id;
+                    name = sensorConfig.short_name || sensorConfig.name || `Channel ${channel}`;
+                } else if (typeof fallback === 'number') {
+                    channel = fallback;
+                    name = `Channel ${fallback}`;
+                } else if (typeof fallback === 'string') {
+                    sensorId = fallback;
+                    name = fallback;
+                }
+
+                const safeKey = channel !== null && channel !== undefined
+                    ? `ch${channel}`
+                    : `id-${(sensorId || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '')}`;
+
+                div.id = `blowdown-${safeKey}`;
+                if (channel !== null && channel !== undefined) {
+                    div.dataset.channel = String(channel);
+                }
+                if (sensorId) {
+                    div.dataset.sensorId = sensorId;
+                }
+                if (color) {
+                    div.style.borderColor = color;
+                }
+
+                div.innerHTML = `
+                    <div class="blowdown-name">${name}</div>
+                    <div class="blowdown-value">---.--</div>
+                    <div class="blowdown-units">PSI</div>
                 `;
                 return div;
             }
@@ -414,6 +629,18 @@
                         valueElement.textContent = Number(sensor.pressure_psi).toFixed(2);
                         element.classList.remove('error');
                         if (stateEl) stateEl.textContent = 'OK';
+                    }
+
+                    const blowdownElement = document.querySelector(`.blowdown-sensor[data-channel="${sensor.channel}"]`);
+                    if (blowdownElement) {
+                        const blowdownValue = blowdownElement.querySelector('.blowdown-value');
+                        if (sensor.status === 'disconnected' || sensor.status === 'unconfigured') {
+                            blowdownElement.classList.add('error');
+                            if (blowdownValue) blowdownValue.textContent = sensor.status.toUpperCase();
+                        } else {
+                            blowdownElement.classList.remove('error');
+                            if (blowdownValue) blowdownValue.textContent = Number(sensor.pressure_psi).toFixed(2);
+                        }
                     }
                 });
             }
