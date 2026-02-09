@@ -210,9 +210,21 @@
             flex: 3.5;
         }
 
+        .section-lc-tc {
+            display: flex;
+            flex-direction: row;
+            gap: 10px;
+            flex: 1;
+        }
+
         .section-lc {
             border-left: 4px solid #805ad5;
-            flex: 1.5;
+            flex: 1;
+        }
+
+        .section-tc {
+            border-left: 4px solid #e53e3e;
+            flex: 1;
         }
 
         .telemetry-header {
@@ -507,6 +519,50 @@
             min-width: 160px;
             max-width: 220px;
         }
+
+        /* Compact LC/TC grid - 2x2 layout */
+        .compact-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 8px;
+            flex: 1;
+            overflow: visible;
+            align-content: start;
+        }
+
+        .compact-grid .telemetry-item {
+            padding: 10px;
+        }
+
+        .compact-grid .telemetry-value {
+            font-size: 22px;
+            margin-bottom: 2px;
+        }
+
+        .compact-grid .telemetry-units {
+            font-size: 11px;
+        }
+
+        .compact-grid .telemetry-raw {
+            font-size: 13px;
+        }
+
+        .compact-grid .sparkline {
+            height: 28px;
+            margin-top: 4px;
+        }
+
+        .compact-grid canvas.sparkline {
+            height: 28px !important;
+        }
+
+        .compact-grid .telemetry-header-row {
+            margin-bottom: 4px;
+        }
+
+        .compact-grid .telemetry-delta {
+            font-size: 10px;
+        }
     </style>
 </head>
 
@@ -578,19 +634,37 @@
                 <div class="pt-row misc" id="pt-misc-row"></div>
             </div>
 
-            <!-- Load Cells Section -->
-            <div class="telemetry-section section-lc">
-                <div class="telemetry-header">
-                    <div class="telemetry-title">
-                        <i class="fas fa-scale-balanced"></i>
-                        LOAD CELLS
-                        <span class="telemetry-count" id="lc-count">4 channels</span>
+            <!-- Load Cells and Thermocouples Row -->
+            <div class="section-lc-tc">
+                <!-- Load Cells Section -->
+                <div class="telemetry-section section-lc">
+                    <div class="telemetry-header">
+                        <div class="telemetry-title">
+                            <i class="fas fa-scale-balanced"></i>
+                            LOAD CELLS
+                            <span class="telemetry-count" id="lc-count">4 ch</span>
+                        </div>
+                        <button class="new-log-btn" onclick="tareLCs()" style="font-size: 11px; padding: 4px 8px;">
+                            <i class="fas fa-balance-scale"></i> Tare
+                        </button>
                     </div>
-                    <button class="new-log-btn" onclick="tareLCs()" style="font-size: 12px; padding: 6px 12px;">
-                        <i class="fas fa-balance-scale"></i> Tare Load Cells
-                    </button>
+                    <div class="compact-grid" id="lc-readings"></div>
                 </div>
-                <div class="telemetry-grid" id="lc-readings"></div>
+
+                <!-- Thermocouples Section -->
+                <div class="telemetry-section section-tc">
+                    <div class="telemetry-header">
+                        <div class="telemetry-title">
+                            <i class="fas fa-temperature-high"></i>
+                            THERMOCOUPLES
+                            <span class="telemetry-count" id="tc-count">4 ch</span>
+                        </div>
+                        <button class="new-log-btn" onclick="tareTCs()" style="font-size: 11px; padding: 4px 8px;">
+                            <i class="fas fa-bullseye"></i> Tare
+                        </button>
+                    </div>
+                    <div class="compact-grid" id="tc-readings"></div>
+                </div>
             </div>
         </div>
     </div>
@@ -609,6 +683,7 @@
         const DELTA_WINDOW_MS = 20000; // 20 second window for averaging
         const ptHistory = {}; // { channel: [{value, timestamp}, ...] }
         const lcHistory = {}; // { channel: [{value, timestamp}, ...] }
+        const tcHistory = {}; // { channel: [{value, timestamp}, ...] }
         
         function calcSmoothedRate(history, channel, newValue, now) {
             if (!history[channel]) history[channel] = [];
@@ -636,6 +711,7 @@
             const ptLoxRow = document.getElementById('pt-lox-row');
             const ptMiscRow = document.getElementById('pt-misc-row');
             const lcGrid = document.getElementById('lc-readings');
+            const tcGrid = document.getElementById('tc-readings');
 
             // Define PT channel order for each row
             // Fuel: PT11(5), PT12(6), PT13(7), PT14(8), PT24(15), PT23(14), PT15(9)
@@ -667,6 +743,12 @@
                 lcGrid.appendChild(item);
             }
 
+            // Create TC placeholders (4 channels)
+            for (let i = 0; i < 4; i++) {
+                const item = createTelemetryItem('TC', i, '°F');
+                tcGrid.appendChild(item);
+            }
+
             // Load PT names/ratings from interface_config.json
             try {
                 const res = await fetch('/api/config');
@@ -681,7 +763,7 @@
             const div = document.createElement('div');
             div.className = 'telemetry-item';
             div.id = `${type.toLowerCase()}-${channel}`;
-            const deltaUnit = type === 'PT' ? 'PSI/min' : 'lbf/min';
+            const deltaUnit = type === 'PT' ? 'PSI/min' : (type === 'TC' ? '°F/min' : 'lbf/min');
             const deltaHtml = `<div class="telemetry-delta">Δ --</div>`;
             div.innerHTML = `
                 <div class="telemetry-header-row">
@@ -823,6 +905,65 @@
                 // Show raw V/V prominently (only update if provided, preserve existing)
                 if (ch.v_per_v !== undefined && ch.v_per_v !== null && rawEl) {
                     rawEl.textContent = `${Number(ch.v_per_v).toFixed(6)} V/V`;
+                }
+            });
+        }
+
+        function updateTCData(channels) {
+            if (!channels || !Array.isArray(channels)) return;
+
+            channels.forEach((ch, arrayIdx) => {
+                if (!ch) return;
+                
+                const idx = (typeof ch.channel === 'number') ? ch.channel : arrayIdx;
+                const element = document.getElementById(`tc-${idx}`);
+                if (!element) return;
+
+                const labelEl = element.querySelector('.telemetry-label');
+                const valueEl = element.querySelector('.telemetry-value');
+                const rawEl = element.querySelector('.telemetry-raw');
+                const deltaEl = element.querySelector('.telemetry-delta');
+                
+                element.classList.remove('disconnected', 'unconfigured');
+
+                // Update label with name from config
+                if (ch.name) {
+                    labelEl.textContent = ch.name;
+                }
+
+                if (ch.status === 'disconnected') {
+                    valueEl.textContent = 'DISCONNECTED';
+                    if (rawEl) rawEl.textContent = '--';
+                    if (deltaEl) {
+                        deltaEl.textContent = 'Δ --';
+                        deltaEl.classList.remove('positive', 'negative');
+                    }
+                    element.classList.add('disconnected');
+                } else {
+                    // Display temperature in °F
+                    const tempF = ch.temp_f !== undefined ? ch.temp_f : 0;
+                    const now = Date.now();
+                    valueEl.textContent = tempF.toFixed(1);
+                    pushSpark('tc', idx, tempF);
+
+                    // Calculate and display smoothed delta °F/min (rate * 60)
+                    if (deltaEl) {
+                        const rate = calcSmoothedRate(tcHistory, idx, tempF, now);
+                        if (rate !== null) {
+                            const ratePerMin = rate * 60;
+                            const sign = ratePerMin >= 0 ? '+' : '';
+                            deltaEl.textContent = `Δ ${sign}${ratePerMin.toFixed(1)} °F/min`;
+                            
+                            deltaEl.classList.remove('positive', 'negative');
+                            if (ratePerMin > 10) deltaEl.classList.add('positive');
+                            else if (ratePerMin < -10) deltaEl.classList.add('negative');
+                        }
+                    }
+
+                    // Show raw temp in rawEl
+                    if (ch.temp_raw !== undefined && rawEl) {
+                        rawEl.textContent = `raw: ${ch.temp_raw.toFixed(1)}°F`;
+                    }
                 }
             });
         }
@@ -1018,6 +1159,53 @@
             });
         }
 
+        function tareTCs() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                Swal.fire({
+                    title: 'Connection Error',
+                    text: 'WebSocket not connected',
+                    icon: 'error',
+                    toast: true,
+                    position: 'top-end',
+                    timer: 2500,
+                    showConfirmButton: false,
+                    backdrop: false
+                });
+                return;
+            }
+
+            Swal.fire({
+                title: 'Tare Thermocouples?',
+                text: 'This will zero all TC readings at their current values',
+                imageUrl: 'tare.png',
+                imageWidth: 80,
+                imageHeight: 80,
+                imageAlt: 'Tare',
+                showCancelButton: true,
+                confirmButtonColor: '#e53e3e',
+                cancelButtonColor: '#a0aec0',
+                confirmButtonText: 'Tare Now'
+            }).then((result) => {
+                if (result.isConfirmed) {
+                    try {
+                        ws.send(JSON.stringify({ action: 'tare_tc' }));
+                    } catch (error) {
+                        console.error('Failed to send tare TC command:', error);
+                        Swal.fire({
+                            title: 'Error',
+                            text: 'Failed to send tare command',
+                            icon: 'error',
+                            toast: true,
+                            position: 'top-end',
+                            timer: 2500,
+                            showConfirmButton: false,
+                            backdrop: false
+                        });
+                    }
+                }
+            });
+        }
+
         function tareIndividual(type, channel) {
             if (!ws || ws.readyState !== WebSocket.OPEN) {
                 Swal.fire({
@@ -1033,7 +1221,7 @@
                 return;
             }
 
-            const sensorName = type === 'pt' ? `PT${channel}` : `LC${channel}`;
+            const sensorName = type === 'pt' ? `PT${channel}` : (type === 'tc' ? `TC${channel}` : `LC${channel}`);
             
             Swal.fire({
                 title: `Tare ${sensorName}?`,
@@ -1043,13 +1231,13 @@
                 imageHeight: 80,
                 imageAlt: 'Tare',
                 showCancelButton: true,
-                confirmButtonColor: '#3182ce',
+                confirmButtonColor: type === 'tc' ? '#e53e3e' : '#3182ce',
                 cancelButtonColor: '#a0aec0',
                 confirmButtonText: 'Tare Now'
             }).then((result) => {
                 if (result.isConfirmed) {
                     try {
-                        const action = type === 'pt' ? 'tare_pt_channel' : 'tare_lc_channel';
+                        const action = type === 'pt' ? 'tare_pt_channel' : (type === 'tc' ? 'tare_tc_channel' : 'tare_lc_channel');
                         ws.send(JSON.stringify({ action: action, channel: channel }));
                         
                         Swal.fire({
@@ -1161,14 +1349,18 @@
                         // Push samples into sparklines and collect latest values
                         const ptLatest = new Array(16).fill(undefined);
                         const lcLatest = new Array(4).fill(undefined);
+                        const tcLatest = new Array(4).fill(undefined);
                         chs.forEach((key)=>{
                             const series = d.data && d.data[key];
                             if (!Array.isArray(series) || series.length===0) return;
                             // Map key back to card index
                             let type='pt', idx=0;
-                            const mPT = key.match(/^PT(\d+)_psi$/); const mLC = key.match(/^LC(\d+)_lbf$/);
+                            const mPT = key.match(/^PT(\d+)_psi$/); 
+                            const mLC = key.match(/^LC(\d+)_lbf$/);
+                            const mTC = key.match(/^TC(\d+)_degF$/);
                             if (mPT){ type='pt'; idx=Number(mPT[1]); }
                             else if (mLC){ type='lc'; idx=Number(mLC[1]); }
+                            else if (mTC){ type='tc'; idx=Number(mTC[1]); }
                             // Push all samples with inferred timestamps from batch timing
                             const baseMs = (typeof d.ts_unix_us === 'number') ? d.ts_unix_us/1000 : performance.now();
                             const dtMs = (typeof d.dt_us === 'number') ? Math.max(1, d.dt_us/1000) : 10;
@@ -1179,10 +1371,12 @@
                             const lastVal = Number(series[series.length-1]);
                             if (type==='pt' && idx>=0 && idx<ptLatest.length) ptLatest[idx] = { channel: idx, pressure_psi: lastVal };
                             if (type==='lc' && idx>=0 && idx<lcLatest.length) lcLatest[idx] = { channel: idx, lbf: lastVal };
+                            if (type==='tc' && idx>=0 && idx<tcLatest.length) tcLatest[idx] = { channel: idx, temp_f: lastVal };
                         });
                         // Update tile values from latest batch samples
                         if (ptLatest.some(v=>v!==undefined)) updatePTData(ptLatest);
                         if (lcLatest.some(v=>v!==undefined)) updateLCData(lcLatest);
+                        if (tcLatest.some(v=>v!==undefined)) updateTCData(tcLatest);
                         messageCount++;
                         document.getElementById('message-count').textContent = `${messageCount} messages`;
                         updateTimestamp();
@@ -1222,11 +1416,14 @@
                         if (msg.data.channels && msg.data.channels.length > 0) {
                             const pt = msg.data.channels.filter(ch => 'pressure_psi' in ch);
                             const lc = msg.data.channels.filter(ch => ('lbf' in ch) || ('v_per_v' in ch));
+                            const tc = msg.data.channels.filter(ch => 'temp_f' in ch);
                             if (pt.length) updatePTData(pt);
                             if (lc.length) updateLCData(lc);
+                            if (tc.length) updateTCData(tc);
                             // Also push latest values into rings for charts
                             pt.forEach((ch, idx)=>{ if (typeof ch.pressure_psi==='number') pushSpark('pt', ch.channel||idx, ch.pressure_psi); });
                             lc.forEach((ch, idx)=>{ if (typeof ch.lbf==='number') pushSpark('lc', ch.channel||idx, ch.lbf); });
+                            tc.forEach((ch, idx)=>{ if (typeof ch.temp_f==='number') pushSpark('tc', ch.channel||idx, ch.temp_f); });
                         }
                         
                         updateTimestamp();
@@ -1316,7 +1513,7 @@
 
         // Sparkline charts (Chart.js) ---------------------------------
         const SPARK_WINDOW_MS = 30000; // 30 seconds
-        const charts = { pt: [], lc: [] };
+        const charts = { pt: [], lc: [], tc: [] };
         const chartUpdateQueue = new Set();
 
         function resolveTimestamp(epochMs){
@@ -1334,12 +1531,13 @@
             if (!canvas) return null;
 
             const ctx = canvas.getContext('2d');
+            const chartColor = type === 'pt' ? '#3182ce' : (type === 'tc' ? '#e53e3e' : '#805ad5');
             const chart = new Chart(ctx, {
                 type: 'line',
                 data: {
                     datasets: [{
                         data: [],
-                        borderColor: type === 'pt' ? '#3182ce' : '#805ad5',
+                        borderColor: chartColor,
                         borderWidth: 2,
                         pointRadius: 0,
                         fill: false,

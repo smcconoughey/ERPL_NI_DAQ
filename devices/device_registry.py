@@ -3,6 +3,7 @@ from typing import Dict, List, Type
 from .base_device import BaseDevice
 from .pt_card import PTCard
 from .lc_card import LCCard
+from .tc_card import TCCard
 
 class DeviceRegistry:
     """Registry for managing different DAQ device types"""
@@ -10,6 +11,7 @@ class DeviceRegistry:
     _devices: Dict[str, Type[BaseDevice]] = {
         "pt_card": PTCard,
         "lc_card": LCCard,
+        "tc_card": TCCard,
     }
     
     @classmethod

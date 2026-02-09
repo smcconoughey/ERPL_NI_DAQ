@@ -174,6 +174,8 @@ class DAQWebSocketServer {
                             this.lastMessage = parsedData;
                             this.messageCount++;
                             this.ingestMerged(parsedData);
+                            // Also broadcast real-time data for immediate UI updates
+                            this.broadcast({ type: 'data', data: parsedData, timestamp: new Date().toISOString() });
                         } else {
                             // Merge PT and LC frames so UI gets unified payload
                             if (parsedData && parsedData.channels && parsedData.channels.length) {
@@ -355,14 +357,23 @@ class DAQWebSocketServer {
             for (const ch of chs){
                 // Derive a compact channel key
                 let key = null;
-                if (typeof ch.channel === 'number' && ch.pressure_psi !== undefined) key = `PT${ch.channel}_psi`;
-                else if (typeof ch.channel === 'number' && ch.lbf !== undefined) key = `LC${ch.channel}_lbf`;
-                else if (ch.name) key = ch.name.replace(/\s+/g,'_');
-                if (!key) continue;
+                let value = null;
+                if (typeof ch.channel === 'number' && ch.pressure_psi !== undefined) {
+                    key = `PT${ch.channel}_psi`;
+                    value = Number(ch.pressure_psi);
+                } else if (typeof ch.channel === 'number' && ch.lbf !== undefined) {
+                    key = `LC${ch.channel}_lbf`;
+                    value = Number(ch.lbf);
+                } else if (typeof ch.channel === 'number' && ch.temp_f !== undefined) {
+                    key = `TC${ch.channel}_degF`;
+                    value = Number(ch.temp_f);
+                } else if (ch.name) {
+                    key = ch.name.replace(/\s+/g,'_');
+                }
+                if (!key || value === null) continue;
                 this.batch.channels.add(key);
                 if (!this.batch.data[key]) this.batch.data[key] = [];
-                if (ch.pressure_psi !== undefined) this.batch.data[key].push(Number(ch.pressure_psi));
-                else if (ch.lbf !== undefined) this.batch.data[key].push(Number(ch.lbf));
+                this.batch.data[key].push(value);
             }
             this.batch.count++;
         }catch(e){/* ignore */}

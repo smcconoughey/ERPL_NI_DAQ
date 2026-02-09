@@ -27,6 +27,7 @@ from config import (
     MODULE_SLOT,
     PT_MODULE_SLOT,
     LC_MODULE_SLOT,
+    TC_MODULE_SLOT,
     DEBUG_ENABLE,
     DEBUG_RAW_SUMMARY,
     DEBUG_RAW_SAMPLES,
@@ -53,6 +54,9 @@ class DAQStreamer:
         self.lc_log_file = None
         self.lc_log_writer = None
         self.lc_log_filename = None
+        self.tc_log_file = None
+        self.tc_log_writer = None
+        self.tc_log_filename = None
         # Raw CSV logging (per-read raw samples)
         self.raw_log_file = None
         self.raw_log_writer = None
@@ -60,6 +64,7 @@ class DAQStreamer:
         self.log_lock = threading.Lock()
         self.log_data_count = 0
         self.lc_log_data_count = 0
+        self.tc_log_data_count = 0
         self.log_start_time = None
 
         # Shutdown control
@@ -68,7 +73,15 @@ class DAQStreamer:
         # Last-known per-device channel snapshots for merged logging/UI
         self._last_pt_channels = []
         self._last_lc_channels = []
+        self._last_tc_channels = []
         self.raw_snapshots: Dict[str, Any] = {}
+        
+        # Background thread for slow on-demand devices (TC)
+        self._tc_thread = None
+        self._tc_thread_stop = threading.Event()
+        self._tc_data_lock = threading.Lock()
+        self._tc_cached_raw = None
+        self._tc_cached_processed = None
 
         # Persistent NI-DAQmx tasks (device -> task)
         self._device_tasks = []
@@ -80,10 +93,12 @@ class DAQStreamer:
         self.samples_per_read: int = 10
         self._accumulated_pt_samples: int = 0
         self._accumulated_lc_samples: int = 0
+        self._accumulated_tc_samples: int = 0
         self.loop_period_s: float = 0.10
         self.read_timeout_s: float = 1.0
         self._pending_pt_rows: List[Dict[str, Any]] = []
         self._pending_lc_rows: List[Dict[str, Any]] = []
+        self._pending_tc_rows: List[Dict[str, Any]] = []
         self._loop_index: int = 0
         self._next_loop_deadline: Optional[float] = None
         self._last_loop_period: float = self.loop_period_s
@@ -147,6 +162,8 @@ class DAQStreamer:
                     slot = PT_MODULE_SLOT
                 elif device_name == "lc_card":
                     slot = LC_MODULE_SLOT
+                elif device_name == "tc_card":
+                    slot = TC_MODULE_SLOT
 
                 device = DeviceRegistry.create_device(device_name, DEVICE_CHASSIS, module_slot=slot)
                 self.devices.append(device)
@@ -352,22 +369,27 @@ class DAQStreamer:
                 if not started:
                     continue
 
-            # Derive loop timing from the configured device rates so logging cadence is realistic
+            # Derive loop timing from the configured device rates (exclude slow on-demand devices)
             try:
-                rates = [float(getattr(d, 'sample_rate', 0.0)) for d, _ in self._device_tasks]
+                rates = [float(getattr(d, 'sample_rate', 0.0)) for d, _ in self._device_tasks
+                         if not getattr(d, 'on_demand', False)]
                 rates = [r for r in rates if r > 0.0]
                 if rates:
                     self.sample_clock_hz = min(rates)
             except Exception:
                 pass
             try:
-                chunk_sizes = [int(getattr(d, 'samples_per_channel', 0)) for d, _ in self._device_tasks]
+                chunk_sizes = [int(getattr(d, 'samples_per_channel', 0)) for d, _ in self._device_tasks
+                               if not getattr(d, 'on_demand', False)]
                 chunk_sizes = [c for c in chunk_sizes if c > 0]
                 if chunk_sizes:
                     self.samples_per_read = min(chunk_sizes)
             except Exception:
                 pass
             self._recompute_loop_timing()
+            
+            # Start background thread for on-demand (slow) devices like TC
+            self._start_on_demand_threads()
 
         # Back off to configurable host cadence using TARGET_SEND_HZ
         try:
@@ -609,6 +631,8 @@ class DAQStreamer:
                                 self._last_pt_channels = channels
                             elif 'v_per_v' in first or 'lbf' in first:
                                 self._last_lc_channels = channels
+                            elif 'temp_f' in first:
+                                self._last_tc_channels = channels
 
                         device_key = self._device_key(device)
                         if device_key:
@@ -637,6 +661,23 @@ class DAQStreamer:
                 for device, task in list(self._device_tasks):
                     try:
                         dev_key = self._device_key(device)
+                        
+                        # Check if device uses on-demand reads (e.g., NI-9211 TC card)
+                        is_on_demand = bool(getattr(device, 'on_demand', False))
+                        
+                        # On-demand devices are read by background thread - use cached data
+                        if is_on_demand:
+                            with self._tc_data_lock:
+                                if self._tc_cached_processed:
+                                    processed_data = self._tc_cached_processed.copy()
+                                    processed_data["timestamp"] = time.time()
+                                    processed_data["source"] = device.device_info.get('device_type')
+                                    
+                                    samples = processed_data.get('samples')
+                                    if isinstance(samples, list):
+                                        device_samples_map[dev_key] = samples
+                                        self._device_sample_rates[dev_key] = 1.0  # TC at ~1 Hz effective
+                            continue  # Skip to next device
 
                         default_chunk = max(1, int(self.samples_per_read))
                         device_chunk = int(getattr(device, 'samples_per_channel', default_chunk))
@@ -659,7 +700,7 @@ class DAQStreamer:
                         try:
                             raw_data = task.read(
                                 number_of_samples_per_channel=read_param,
-                                timeout=self.read_timeout_s,
+                                timeout=self.read_timeout_s if not is_on_demand else 5.0,  # Longer timeout for slow TC
                             )
                             read_latency = time.perf_counter() - read_t0
                             self._read_latencies.append(read_latency)
@@ -670,6 +711,10 @@ class DAQStreamer:
                                 logger.warning(f"High read latency: {read_latency*1000:.1f} ms for {dev_key}")
                         except Exception as e:
                             msg = str(e)
+                            # On-demand devices shouldn't hit timing errors, re-raise if they do
+                            if is_on_demand:
+                                logger.error(f"On-demand device {dev_key} read error: {e}")
+                                raise
                             if ('-200277' in msg) or ('Invalid combination of position and offset' in msg):
                                 # Fallback to current read position, single sample
                                 try:
@@ -717,6 +762,12 @@ class DAQStreamer:
                             else:
                                 raise
 
+                        # Normalize on-demand single-sample reads to expected format [[val], [val], ...]
+                        if is_on_demand and isinstance(raw_data, list) and raw_data:
+                            # Check if it's flat [val0, val1, ...] vs nested [[val0], [val1], ...]
+                            if raw_data and not isinstance(raw_data[0], list):
+                                raw_data = [[val] for val in raw_data]
+                        
                         # Stale data detection (from debug script lessons)
                         self._total_reads += 1
                         if isinstance(raw_data, list) and raw_data and len(raw_data) > 0:
@@ -861,6 +912,8 @@ class DAQStreamer:
                                 self._last_pt_channels = channels
                             elif 'v_per_v' in first or 'lbf' in first:
                                 self._last_lc_channels = channels
+                            elif 'temp_f' in first:
+                                self._last_tc_channels = channels
 
                         device_key = self._device_key(device)
                         if device_key:
@@ -938,6 +991,7 @@ class DAQStreamer:
                 self._write_tare_config_snapshot()
 
             # Emit merged frame to Node at 100 Hz cadence
+            # Server expects flat structure with 'source': 'Merged' - it handles wrapping for WS clients
             merged = {
                 'timestamp': time.time(),
                 'source': 'Merged',
@@ -947,8 +1001,12 @@ class DAQStreamer:
                 merged['channels'].extend(self._last_pt_channels)
             if isinstance(self._last_lc_channels, list):
                 merged['channels'].extend(self._last_lc_channels)
+            # Get TC channels with proper locking (updated by background thread)
+            with self._tc_data_lock:
+                if isinstance(self._last_tc_channels, list) and self._last_tc_channels:
+                    merged['channels'].extend(list(self._last_tc_channels))
             
-            # Add performance monitoring stats to merged frame
+            # Add performance monitoring stats
             if self._read_latencies:
                 avg_latency = sum(self._read_latencies) / len(self._read_latencies)
                 max_latency = max(self._read_latencies)
@@ -1124,6 +1182,54 @@ class DAQStreamer:
             # Sensible defaults if configuration is missing or invalid
             self.loop_period_s = 0.10
             self.read_timeout_s = 0.50
+
+    def _start_on_demand_threads(self) -> None:
+        """Start background threads for slow on-demand devices (like TC card)."""
+        for device, task in self._device_tasks:
+            if getattr(device, 'on_demand', False):
+                dev_type = device.device_info.get('device_type', 'unknown')
+                if 'tc' in dev_type.lower() or 'thermocouple' in dev_type.lower():
+                    self._tc_thread_stop.clear()
+                    self._tc_thread = threading.Thread(
+                        target=self._tc_reader_thread,
+                        args=(device, task),
+                        daemon=True,
+                        name="TC-Reader"
+                    )
+                    self._tc_thread.start()
+                    logger.info(f"Started background TC reader thread for {dev_type}")
+
+    def _tc_reader_thread(self, device, task) -> None:
+        """Background thread that continuously reads TC at its slow native rate."""
+        logger.info("TC reader thread started")
+        while not self._tc_thread_stop.is_set():
+            try:
+                # Read single sample from all 4 TC channels (~350ms)
+                raw_data = task.read(number_of_samples_per_channel=1, timeout=5.0)
+                
+                # Normalize format if needed
+                if isinstance(raw_data, list) and raw_data and not isinstance(raw_data[0], list):
+                    raw_data = [[val] for val in raw_data]
+                
+                # Process data
+                processed = device.process_data(raw_data)
+                
+                # Cache for main loop
+                with self._tc_data_lock:
+                    self._tc_cached_raw = raw_data
+                    self._tc_cached_processed = processed
+                    
+                    # Update last channels for merged output
+                    channels = processed.get('channels', [])
+                    if channels:
+                        self._last_tc_channels = channels
+                
+            except Exception as e:
+                if not self._tc_thread_stop.is_set():
+                    logger.warning(f"TC read error: {e}")
+                time.sleep(0.5)  # Back off on error
+        
+        logger.info("TC reader thread stopped")
 
     def _collect_channel_tare_requests(self) -> Tuple[set[int], set[int]]:
         base_path = Path(__file__).parent
@@ -1342,6 +1448,8 @@ class DAQStreamer:
             return 'pt'
         if 'lc' in dtype or 'load' in dtype:
             return 'lc'
+        if 'tc' in dtype or 'thermocouple' in dtype:
+            return 'tc'
         return ''
 
     def _queue_sample_rows(self, sample_map: Dict[str, List[List[Dict[str, Any]]]]) -> None:
@@ -1361,8 +1469,10 @@ class DAQStreamer:
             ptmA = [math.nan] * 16
             lcLbf = [math.nan] * 4
             lcVv = [math.nan] * 4
+            tcDegF = [math.nan] * 4
             ptOk = False
             lcOk = False
+            tcOk = False
 
             pt_samples = sample_map.get('pt')
             if isinstance(pt_samples, list) and sample_idx < len(pt_samples):
@@ -1385,6 +1495,16 @@ class DAQStreamer:
                             lcOk = True
                         if 'v_per_v' in entry:
                             lcVv[idx] = entry['v_per_v']
+
+            tc_samples = sample_map.get('tc')
+            if isinstance(tc_samples, list) and sample_idx < len(tc_samples):
+                for entry in tc_samples[sample_idx]:
+                    idx = entry.get('channel')
+                    if isinstance(idx, int) and 0 <= idx < 4:
+                        if 'temp_f' in entry:
+                            tcDegF[idx] = entry['temp_f']
+                            tcOk = True
+
             # Do not fill-forward in the CSV; we want NaN to make gaps explicit
             if ptOk:
                 self._pending_pt_rows.append({
@@ -1398,6 +1518,12 @@ class DAQStreamer:
                     'lcLbf': lcLbf,
                     'lcVv': lcVv,
                     'lcOk': True,
+                    'loop_index': self._loop_index,
+                })
+            if tcOk:
+                self._pending_tc_rows.append({
+                    'tcDegF': tcDegF,
+                    'tcOk': True,
                     'loop_index': self._loop_index,
                 })
 
@@ -1419,18 +1545,22 @@ class DAQStreamer:
             time_str = now.strftime("%H%M")
             pt_log_path = log_dir / f"{time_str}_pt.csv"
             lc_log_path = log_dir / f"{time_str}_lc.csv"
+            tc_log_path = log_dir / f"{time_str}_tc.csv"
             
             # If file exists, append a number
             counter = 1
-            while pt_log_path.exists() or lc_log_path.exists():
+            while pt_log_path.exists() or lc_log_path.exists() or tc_log_path.exists():
                 pt_log_path = log_dir / f"{time_str}_pt_{counter}.csv"
                 lc_log_path = log_dir / f"{time_str}_lc_{counter}.csv"
+                tc_log_path = log_dir / f"{time_str}_tc_{counter}.csv"
                 counter += 1
             
             self.pt_log_file = open(pt_log_path, 'w', newline='')
             self.pt_log_writer = csv.writer(self.pt_log_file)
             self.lc_log_file = open(lc_log_path, 'w', newline='')
             self.lc_log_writer = csv.writer(self.lc_log_file)
+            self.tc_log_file = open(tc_log_path, 'w', newline='')
+            self.tc_log_writer = csv.writer(self.tc_log_file)
             
             # Write PT header
             pt_header = ['timestamp', 'elapsed_ms', 'wall_ms', 'loop_index', 'pt_ok']
@@ -1449,6 +1579,13 @@ class DAQStreamer:
                 lc_header.append(f'LC{i}_VperV')
             self.lc_log_writer.writerow(lc_header)
             self.lc_log_file.flush()
+            
+            # Write TC header
+            tc_header = ['timestamp', 'elapsed_ms', 'wall_ms', 'loop_index', 'tc_ok']
+            for i in range(4):
+                tc_header.append(f'TC{i}_degF')
+            self.tc_log_writer.writerow(tc_header)
+            self.tc_log_file.flush()
 
             # Start raw CSV alongside merged CSV
             raw_log_path = log_dir / f"{time_str}_raw.csv"
@@ -1464,14 +1601,18 @@ class DAQStreamer:
             self.logging_enabled = True
             self.log_filename = str(pt_log_path)
             self.lc_log_filename = str(lc_log_path)
+            self.tc_log_filename = str(tc_log_path)
             self.raw_log_filename = str(raw_log_path)
             self.log_data_count = 0
             self.lc_log_data_count = 0
+            self.tc_log_data_count = 0
             self.log_start_time = time.time()
             self._pending_pt_rows = []
             self._pending_lc_rows = []
+            self._pending_tc_rows = []
             self._accumulated_pt_samples = 0
             self._accumulated_lc_samples = 0
+            self._accumulated_tc_samples = 0
             self._device_sample_rates.clear()
             
             logger.info(f"Started CSV logging: {self.log_filename}")
@@ -1489,6 +1630,9 @@ class DAQStreamer:
             if self.lc_log_file:
                 self.lc_log_file.close()
                 self.lc_log_file = None
+            if self.tc_log_file:
+                self.tc_log_file.close()
+                self.tc_log_file = None
             return {"success": False, "message": str(e)}
     
     def stop_logging(self) -> Dict:
@@ -1509,6 +1653,9 @@ class DAQStreamer:
             if self.lc_log_file:
                 self.lc_log_file.close()
                 self.lc_log_file = None
+            if self.tc_log_file:
+                self.tc_log_file.close()
+                self.tc_log_file = None
             if self.raw_log_file:
                 try:
                     self.raw_log_file.close()
@@ -1517,25 +1664,32 @@ class DAQStreamer:
                 self.raw_log_file = None
             self._pending_pt_rows = []
             self._pending_lc_rows = []
+            self._pending_tc_rows = []
             self.log_start_time = None
             
             logger.info(
-                f"Stopped CSV logging. Wrote {self.log_data_count} PT rows to {self.log_filename} and "
-                f"{self.lc_log_data_count} LC rows to {self.lc_log_filename}"
+                f"Stopped CSV logging. Wrote {self.log_data_count} PT rows to {self.log_filename}, "
+                f"{self.lc_log_data_count} LC rows to {self.lc_log_filename}, "
+                f"{self.tc_log_data_count} TC rows to {self.tc_log_filename}"
             )
             filename = self.log_filename
             raw_filename = self.raw_log_filename
             lc_filename = self.lc_log_filename
+            tc_filename = self.tc_log_filename
             pt_rows = self.log_data_count
             lc_rows = self.lc_log_data_count
+            tc_rows = self.tc_log_data_count
             self.log_filename = None
             self.lc_log_filename = None
+            self.tc_log_filename = None
             self.raw_log_filename = None
             self.pt_log_writer = None
             self.lc_log_writer = None
+            self.tc_log_writer = None
             self.raw_log_writer = None
             self.log_data_count = 0
             self.lc_log_data_count = 0
+            self.tc_log_data_count = 0
             self._device_sample_rates.clear()
             
             try:
@@ -1548,8 +1702,10 @@ class DAQStreamer:
                 "message": "Logging stopped",
                 "rows": pt_rows,
                 "lc_rows": lc_rows,
+                "tc_rows": tc_rows,
                 "filename": filename,
                 "lc_filename": lc_filename,
+                "tc_filename": tc_filename,
                 "raw_filename": raw_filename,
             }
         
@@ -1633,6 +1789,27 @@ class DAQStreamer:
                     except Exception:
                         pass
 
+            # TC is much slower rate, use same approach
+            tc_rate = self._device_sample_rates.get('tc', 1.0)  # Default 1 Hz for slow TC
+            while self._pending_tc_rows and self.tc_log_writer is not None:
+                sample = self._pending_tc_rows.pop(0)
+                timestamp, elapsed_ms = self._compute_log_timestamp(self._accumulated_tc_samples, tc_rate)
+                wall_ms = int(time.time() * 1000)
+                row = [
+                    timestamp,
+                    elapsed_ms,
+                    wall_ms,
+                    sample.get('loop_index', self._loop_index),
+                    1 if sample.get('tcOk') else 0,
+                ]
+                row.extend(sample.get('tcDegF', []))
+                self.tc_log_writer.writerow(row)
+                self.tc_log_data_count += 1
+                self._accumulated_tc_samples += 1
+
+                if self.tc_log_data_count % 10 == 0 and self.tc_log_file is not None:
+                    self.tc_log_file.flush()
+
     def _write_raw_samples_csv(self, device: Any, raw_data: List[List[float]]) -> None:
         if not self.logging_enabled or self.raw_log_writer is None:
             return
@@ -1664,9 +1841,11 @@ class DAQStreamer:
                 "filename": pt_filename,
                 "pt_filename": pt_filename,
                 "lc_filename": self.lc_log_filename,
+                "tc_filename": self.tc_log_filename,
                 "rows": rows if rows is not None else self.log_data_count,
                 "pt_rows": self.log_data_count,
                 "lc_rows": self.lc_log_data_count,
+                "tc_rows": self.tc_log_data_count,
                 "elapsed_sec": (time.time() - self.log_start_time) if (active and self.log_start_time) else 0,
                 "updated_at": datetime.now().isoformat(),
             }
@@ -1790,6 +1969,13 @@ class DAQStreamer:
     
     def stop(self) -> None:
         self.running = False
+        
+        # Stop TC background thread
+        if self._tc_thread is not None:
+            self._tc_thread_stop.set()
+            self._tc_thread.join(timeout=2.0)
+            self._tc_thread = None
+        
         # Stop and clear tasks on exit
         for _, task in self._device_tasks:
             try:

@@ -11,16 +11,16 @@ DEBUG_RAW_SAMPLES = False      # Log a few raw samples per channel periodically
 DEBUG_SAMPLE_EVERY_N = 50      # How often to log raw samples (reads)
 
 # Target UI/WebSocket send rate (Hz)
-TARGET_SEND_HZ = 100.0
+TARGET_SEND_HZ = 75.0
 
 # Device configuration
 DEVICE_CHASSIS = "cDAQ9189-2462EFD"  # Actual device name from NI MAX
-# Temporarily disable LC card to troubleshoot lag
-ACTIVE_DEVICES = ["pt_card", "lc_card"]  # List of active device modules
+ACTIVE_DEVICES = ["pt_card", "lc_card", "tc_card"]  # List of active device modules
 
 # Per-device slot overrides (fallback if autodetect fails)
 PT_MODULE_SLOT = 2
 LC_MODULE_SLOT = 1
+TC_MODULE_SLOT = 3  # NI-9211 thermocouple card
 MODULE_SLOT = 1  # legacy fallback
 
 # PT Calibration Configuration - now loaded from interface_config.json

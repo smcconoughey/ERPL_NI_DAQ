@@ -103,7 +103,7 @@
       "serial": "1A01WPHB22R",
       "group": "fuel",
       "calibration": {
-        "max_psi": 1500.0,
+        "max_psi": 2000.0,
         "zero_ma": 4.0,
         "units": "psi"
       }

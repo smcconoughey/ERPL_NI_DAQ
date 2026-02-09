@@ -10,8 +10,8 @@
                 "warning_high": 80,
                 "critical_high": 95,
                 "calibration": {
-                    "slope": 59447.0,
-                    "offset": -2.91,
+                    "slope": 296590.0,
+                    "offset": 0.0,
                     "tare_offset": 0.0
                 }
             }
